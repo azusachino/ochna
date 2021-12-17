@@ -1,12 +1,16 @@
 package cmd
 
-import "github.com/spf13/cobra"
+import (
+	"fmt"
+	"github.com/urfave/cli"
+)
 
-var Root = &cobra.Command{
-	Use:   "ochna",
-	Short: "Show help for ochna commands, flags and backends",
-	PersistentPostRun: func(cmd *cobra.Command, args []string) {
-
+var HelpCommand = cli.Command{
+	Name:        "help",
+	Usage:       "print out ochna help",
+	ArgsUsage:   "<ref>",
+	Description: "print out ochna help",
+	Action: func(context *cli.Context) {
+		fmt.Println("ochna helps you do the work")
 	},
-	DisableAutoGenTag: true,
 }

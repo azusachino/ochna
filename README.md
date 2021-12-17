@@ -2,6 +2,10 @@
 
 Ochna (オクナ) 梦鼠木（金莲木）
 
-## learn to code from rclone
+## description
 
-may this project help
+a cli tool for practice
+
+## dependencies
+
+- urfave/cli
