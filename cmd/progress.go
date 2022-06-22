@@ -2,11 +2,12 @@ package cmd
 
 import (
 	"errors"
+
 	"github.com/sirupsen/logrus"
-	"github.com/urfave/cli"
+	"github.com/urfave/cli/v2"
 )
 
-var ProgressCommand = cli.Command{
+var ProgressCommand = &cli.Command{
 	Name:  "progress",
 	Usage: "print out progress",
 	Action: func(ctx *cli.Context) error {

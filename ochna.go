@@ -2,11 +2,12 @@ package main
 
 import (
 	"fmt"
-	"github.com/AzusaChino/ochna/cmd"
-	"github.com/AzusaChino/ochna/pkg/seed"
-	"github.com/sirupsen/logrus"
-	"github.com/urfave/cli"
 	"os"
+
+	"github.com/azusachino/ochna/cmd"
+	"github.com/azusachino/ochna/pkg/seed"
+	"github.com/sirupsen/logrus"
+	"github.com/urfave/cli/v2"
 )
 
 func init() {
@@ -16,18 +17,17 @@ func init() {
 func New() *cli.App {
 	app := cli.NewApp()
 	app.Name = "ochna"
-	app.Description = `
-ochna helps you do whatever you want(joke)`
+	app.Description = `ochna helps you to test lots of stuffs`
 	app.EnableBashCompletion = false
 	app.Flags = []cli.Flag{}
 
-	app.Commands = []cli.Command{
+	app.Commands = []*cli.Command{
 		cmd.HelpCommand,
 		cmd.ProgressCommand,
 	}
 
 	app.Before = func(context *cli.Context) error {
-		if context.GlobalBool("debug") {
+		if context.Bool("debug") {
 			logrus.SetLevel(logrus.DebugLevel)
 		}
 		return nil
