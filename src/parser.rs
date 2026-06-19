@@ -345,7 +345,7 @@ fn extract_rust_call_target(node: tree_sitter::Node, content: &str) -> String {
                     .to_string()
             } else {
                 let text = node.utf8_text(content.as_bytes()).unwrap_or("");
-                text.split('.').last().unwrap_or("").to_string()
+                text.split('.').next_back().unwrap_or("").to_string()
             }
         }
         _ => node.utf8_text(content.as_bytes()).unwrap_or("").to_string(),
@@ -541,7 +541,7 @@ fn extract_go_call_target(node: tree_sitter::Node, content: &str) -> String {
                     .to_string()
             } else {
                 let text = node.utf8_text(content.as_bytes()).unwrap_or("");
-                text.split('.').last().unwrap_or("").to_string()
+                text.split('.').next_back().unwrap_or("").to_string()
             }
         }
         _ => node.utf8_text(content.as_bytes()).unwrap_or("").to_string(),
@@ -1107,10 +1107,7 @@ public class App {
             init_method.doc_comment.as_deref(),
             Some("/**\n     * Init method.\n     */")
         );
-        assert_eq!(
-            init_method.signature.as_deref(),
-            Some("public void init()")
-        );
+        assert_eq!(init_method.signature.as_deref(), Some("public void init()"));
 
         // Find run method
         let run_method = nodes

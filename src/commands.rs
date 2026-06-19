@@ -59,7 +59,16 @@ fn node_exists(conn: &Connection, node_id: &str) -> Result<bool, rusqlite::Error
     Ok(count > 0)
 }
 
-fn get_git_info(workspace: &Path) -> (Option<String>, Option<String>, Option<String>, Option<String>, Option<String>) {
+#[allow(clippy::type_complexity)]
+fn get_git_info(
+    workspace: &Path,
+) -> (
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+) {
     use std::process::Command;
 
     let commit_info = Command::new("git")
@@ -240,11 +249,26 @@ pub fn run_init(workspace: &Path) -> Result<(), Box<dyn Error>> {
 
     println!("Indexing completed successfully.");
     println!("Project Baseline Info:");
-    println!("  Commit SHA:  {}", git_sha.unwrap_or_else(|| "N/A".to_string()));
-    println!("  Commit Msg:  {}", git_subject.unwrap_or_else(|| "N/A".to_string()));
-    println!("  Commit Date: {}", git_date.unwrap_or_else(|| "N/A".to_string()));
-    println!("  Branch:      {}", git_branch.unwrap_or_else(|| "N/A".to_string()));
-    println!("  Git Status:  {}", git_status.unwrap_or_else(|| "N/A".to_string()));
+    println!(
+        "  Commit SHA:  {}",
+        git_sha.unwrap_or_else(|| "N/A".to_string())
+    );
+    println!(
+        "  Commit Msg:  {}",
+        git_subject.unwrap_or_else(|| "N/A".to_string())
+    );
+    println!(
+        "  Commit Date: {}",
+        git_date.unwrap_or_else(|| "N/A".to_string())
+    );
+    println!(
+        "  Branch:      {}",
+        git_branch.unwrap_or_else(|| "N/A".to_string())
+    );
+    println!(
+        "  Git Status:  {}",
+        git_status.unwrap_or_else(|| "N/A".to_string())
+    );
     println!("  Indexed At:  {}", indexed_at);
 
     Ok(())
@@ -264,12 +288,18 @@ pub fn run_status(workspace: &Path) -> Result<(), Box<dyn Error>> {
     let nodes_count: i64 = conn.query_row("SELECT COUNT(*) FROM nodes", [], |row| row.get(0))?;
     let edges_count: i64 = conn.query_row("SELECT COUNT(*) FROM edges", [], |row| row.get(0))?;
 
-    let git_commit_sha = db::get_project_metadata(&conn, "git_commit_sha")?.unwrap_or_else(|| "N/A".to_string());
-    let git_commit_subject = db::get_project_metadata(&conn, "git_commit_subject")?.unwrap_or_else(|| "N/A".to_string());
-    let git_commit_date = db::get_project_metadata(&conn, "git_commit_date")?.unwrap_or_else(|| "N/A".to_string());
-    let git_branch = db::get_project_metadata(&conn, "git_branch")?.unwrap_or_else(|| "N/A".to_string());
-    let git_status = db::get_project_metadata(&conn, "git_status")?.unwrap_or_else(|| "N/A".to_string());
-    let indexed_at = db::get_project_metadata(&conn, "indexed_at")?.unwrap_or_else(|| "N/A".to_string());
+    let git_commit_sha =
+        db::get_project_metadata(&conn, "git_commit_sha")?.unwrap_or_else(|| "N/A".to_string());
+    let git_commit_subject =
+        db::get_project_metadata(&conn, "git_commit_subject")?.unwrap_or_else(|| "N/A".to_string());
+    let git_commit_date =
+        db::get_project_metadata(&conn, "git_commit_date")?.unwrap_or_else(|| "N/A".to_string());
+    let git_branch =
+        db::get_project_metadata(&conn, "git_branch")?.unwrap_or_else(|| "N/A".to_string());
+    let git_status =
+        db::get_project_metadata(&conn, "git_status")?.unwrap_or_else(|| "N/A".to_string());
+    let indexed_at =
+        db::get_project_metadata(&conn, "indexed_at")?.unwrap_or_else(|| "N/A".to_string());
 
     println!("Database Status:");
     println!("  Files: {}", files_count);
@@ -434,8 +464,7 @@ pub fn run_callers(workspace: &Path, symbol: &str) -> Result<(), Box<dyn Error>>
     let conn = Connection::open(&db_path)?;
 
     // Find nodes matching the symbol name or symbol ID
-    let mut target_nodes =
-        db::query_nodes(&conn, Some(symbol), None, None).unwrap_or_default();
+    let mut target_nodes = db::query_nodes(&conn, Some(symbol), None, None).unwrap_or_default();
 
     // If empty, try to find by qualified name or ID
     if target_nodes.is_empty() {
@@ -474,6 +503,7 @@ pub fn run_callers(workspace: &Path, symbol: &str) -> Result<(), Box<dyn Error>>
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn run_node(
     workspace: &Path,
     file: Option<String>,
@@ -589,7 +619,10 @@ pub fn run_node(
             if let Some(target_line) = line {
                 target_nodes.retain(|n| target_line >= n.start_line && target_line <= n.end_line);
                 if target_nodes.is_empty() {
-                    println!("Symbol '{}' not found in database on line {}.", symbol_name, target_line);
+                    println!(
+                        "Symbol '{}' not found in database on line {}.",
+                        symbol_name, target_line
+                    );
                     return Ok(());
                 }
             }
@@ -635,13 +668,11 @@ pub fn run_node(
                 }
 
                 // Callers & Callees
-                let mut callers =
-                    db::find_callers(&conn, &node.id, None).unwrap_or_default();
+                let mut callers = db::find_callers(&conn, &node.id, None).unwrap_or_default();
                 callers.sort_by(|a, b| a.id.cmp(&b.id));
                 callers.dedup_by(|a, b| a.id == b.id);
 
-                let mut callees =
-                    db::find_callees(&conn, &node.id, None).unwrap_or_default();
+                let mut callees = db::find_callees(&conn, &node.id, None).unwrap_or_default();
                 callees.sort_by(|a, b| a.id.cmp(&b.id));
                 callees.dedup_by(|a, b| a.id == b.id);
 
@@ -791,8 +822,8 @@ mod tests {
     use std::fs;
 
     fn create_temp_dir() -> PathBuf {
-        use std::time::{SystemTime, UNIX_EPOCH};
         use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::time::{SystemTime, UNIX_EPOCH};
         static COUNTER: AtomicUsize = AtomicUsize::new(0);
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -879,16 +910,56 @@ mod tests {
         // Verify new query commands query the SQLite database successfully and print expected output formats
         run_search(&temp_workspace, "helper").unwrap();
         run_callers(&temp_workspace, "helper").unwrap();
-        
+
         // Test run_node with file (symbols_only = false)
-        run_node(&temp_workspace, Some("src/main.rs".to_string()), Some(1), Some(10), false, None, false, None).unwrap();
+        run_node(
+            &temp_workspace,
+            Some("src/main.rs".to_string()),
+            Some(1),
+            Some(10),
+            false,
+            None,
+            false,
+            None,
+        )
+        .unwrap();
         // Test run_node with file (symbols_only = true)
-        run_node(&temp_workspace, Some("src/main.rs".to_string()), None, None, true, None, false, None).unwrap();
+        run_node(
+            &temp_workspace,
+            Some("src/main.rs".to_string()),
+            None,
+            None,
+            true,
+            None,
+            false,
+            None,
+        )
+        .unwrap();
         // Test run_node with symbol (include_code = true)
-        run_node(&temp_workspace, None, None, None, false, Some("helper".to_string()), true, None).unwrap();
+        run_node(
+            &temp_workspace,
+            None,
+            None,
+            None,
+            false,
+            Some("helper".to_string()),
+            true,
+            None,
+        )
+        .unwrap();
         // Test run_node with symbol (include_code = true and line filtering)
-        run_node(&temp_workspace, None, None, None, false, Some("helper".to_string()), true, Some(6)).unwrap();
-        
+        run_node(
+            &temp_workspace,
+            None,
+            None,
+            None,
+            false,
+            Some("helper".to_string()),
+            true,
+            Some(6),
+        )
+        .unwrap();
+
         // Test run_explore
         run_explore(&temp_workspace, "helper").unwrap();
 
