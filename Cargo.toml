@@ -9,6 +9,20 @@ homepage = "https://github.com/azusachino/ochna"
 readme = "README.md"
 keywords = ["codebase", "tree-sitter", "ast", "sqlite", "graph"]
 categories = ["development-tools", "command-line-utilities"]
+exclude = [
+    "/clones",
+    "/java_mock_test",
+    "/.ochna",
+    "/.github",
+    "/benches",
+    "/flake.lock",
+    "/flake.nix",
+    "/Makefile",
+    "/pyproject.toml",
+    "/pyscripts",
+    "/.python-version",
+    "/uv.lock",
+]
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }
