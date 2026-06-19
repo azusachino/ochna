@@ -48,6 +48,14 @@ pub struct UnresolvedRef {
     pub column: i64,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct RawCall {
+    pub caller_id: String,
+    pub callee_name: String,
+    pub line: i64,
+    pub column: i64,
+}
+
 /// Initialize the SQLite database schema.
 /// Enforces foreign key constraints and creates all necessary tables,
 /// indexes, the FTS5 virtual table, and the update/delete/insert triggers.
@@ -114,6 +122,22 @@ pub fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
             column INTEGER NOT NULL,
             FOREIGN KEY (source_id) REFERENCES nodes(id) ON DELETE CASCADE
          )",
+        [],
+    )?;
+
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS raw_calls (
+            caller_id TEXT NOT NULL,
+            callee_name TEXT NOT NULL,
+            line INTEGER NOT NULL,
+            column INTEGER NOT NULL,
+            FOREIGN KEY (caller_id) REFERENCES nodes(id) ON DELETE CASCADE
+         )",
+        [],
+    )?;
+
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_raw_calls_caller_id ON raw_calls(caller_id)",
         [],
     )?;
 
@@ -373,6 +397,16 @@ pub fn get_project_metadata(conn: &Connection, key: &str) -> rusqlite::Result<Op
     }
 }
 
+/// Insert an unresolved reference (a call whose target symbol is not indexed).
+pub fn insert_unresolved_ref(conn: &Connection, r: &UnresolvedRef) -> rusqlite::Result<()> {
+    conn.execute(
+        "INSERT INTO unresolved_refs (source_id, specifier, kind, line, column)
+         VALUES (?, ?, ?, ?, ?)",
+        (&r.source_id, &r.specifier, &r.kind, r.line, r.column),
+    )?;
+    Ok(())
+}
+
 /// Find callers (symbols referencing/calling a target node)
 pub fn find_callers(
     conn: &Connection,
@@ -468,6 +502,34 @@ pub fn search_nodes_fts(conn: &Connection, query_str: &str) -> rusqlite::Result<
         nodes.push(map_row_to_node(row)?);
     }
     Ok(nodes)
+}
+
+/// Insert a raw call into the raw_calls table.
+pub fn insert_raw_call(conn: &Connection, r: &RawCall) -> rusqlite::Result<()> {
+    conn.execute(
+        "INSERT INTO raw_calls (caller_id, callee_name, line, column)
+         VALUES (?, ?, ?, ?)",
+        (&r.caller_id, &r.callee_name, r.line, r.column),
+    )?;
+    Ok(())
+}
+
+/// Retrieve all raw calls from the database.
+pub fn get_all_raw_calls(conn: &Connection) -> rusqlite::Result<Vec<RawCall>> {
+    let mut stmt = conn.prepare("SELECT caller_id, callee_name, line, column FROM raw_calls")?;
+    let rows = stmt.query_map([], |row| {
+        Ok(RawCall {
+            caller_id: row.get(0)?,
+            callee_name: row.get(1)?,
+            line: row.get(2)?,
+            column: row.get(3)?,
+        })
+    })?;
+    let mut calls = Vec::new();
+    for r in rows {
+        calls.push(r?);
+    }
+    Ok(calls)
 }
 
 #[cfg(test)]

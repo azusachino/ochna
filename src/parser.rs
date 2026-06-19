@@ -1,13 +1,29 @@
-use crate::db::{Edge, Node};
+use crate::db::{Edge, Node, RawCall, UnresolvedRef};
+use std::collections::HashMap;
 use std::error::Error;
 use tree_sitter::Parser;
 
-/// Parse Rust or Go source code and extract nodes (symbols) and edges (call relationships).
+/// Build a [`RawCall`] from a caller id, callee name, and the call-site AST node
+/// (whose start position records where the call occurs).
+fn raw_call(caller_id: &str, callee_name: String, call_node: tree_sitter::Node) -> RawCall {
+    let pos = call_node.start_position();
+    RawCall {
+        caller_id: caller_id.to_string(),
+        callee_name,
+        line: (pos.row + 1) as i64,
+        column: pos.column as i64,
+    }
+}
+
+/// Parse Rust, Go, or Java source and extract nodes (symbols) plus the raw,
+/// unresolved call sites within them. Call sites are returned unresolved so the
+/// caller can resolve them against the whole-project symbol index (see
+/// [`resolve_calls_global`]) rather than only the symbols in this one file.
 pub fn parse_code(
     file_path: &str,
     content: &str,
     language: &str,
-) -> Result<(Vec<Node>, Vec<Edge>), Box<dyn Error>> {
+) -> Result<(Vec<Node>, Vec<RawCall>), Box<dyn Error>> {
     let mut parser = Parser::new();
     let lang = language.to_lowercase();
 
@@ -59,62 +75,69 @@ pub fn parse_code(
         );
     }
 
-    // Resolve calls to edges with local node matching where possible
+    Ok((nodes, raw_calls))
+}
+
+/// Resolve raw call sites into concrete edges against a project-wide symbol
+/// index, preferring a target in the caller's own file before falling back to a
+/// unique match anywhere in the project. Calls that match no known symbol are
+/// returned separately as [`UnresolvedRef`]s.
+///
+/// - `name_to_ids` maps a symbol's simple name to every node id that bears it.
+/// - `id_to_file` maps a node id to the file it is defined in.
+pub fn resolve_calls_global(
+    calls: &[RawCall],
+    name_to_ids: &HashMap<String, Vec<String>>,
+    id_to_file: &HashMap<String, String>,
+) -> (Vec<Edge>, Vec<UnresolvedRef>) {
     let mut edges = Vec::new();
-    for (caller_id, target_name) in raw_calls {
-        let mut target_id = target_name.clone();
+    let mut unresolved = Vec::new();
 
-        // Extract simple name (last part of a path)
-        let name_parts: Vec<&str> = target_name.split("::").collect();
-        let simple_name = name_parts.last().copied().unwrap_or(&target_name);
+    for call in calls {
+        let name_parts: Vec<&str> = call.callee_name.split("::").collect();
+        let simple_name = name_parts.last().copied().unwrap_or(&call.callee_name);
 
-        // Find if there's a local node in the same file with the same simple name
-        let matches: Vec<&Node> = nodes.iter().filter(|n| n.name == simple_name).collect();
-        if !matches.is_empty() {
-            if matches.len() == 1 {
-                target_id = matches[0].id.clone();
-            } else {
-                // Try to resolve matching receiver/struct/namespace context
-                let mut chosen = None;
-
-                // Case A: target_name has explicit namespace (e.g., Point::new)
-                if name_parts.len() >= 2 {
-                    let ns = name_parts[name_parts.len() - 2];
-                    let ns_infix = format!("::{}::", ns);
-                    for m in &matches {
-                        if m.id.contains(&ns_infix) {
-                            chosen = Some(m.id.clone());
-                            break;
-                        }
-                    }
-                }
-
-                // Case B: no namespace, use caller's struct context (if caller is a method)
-                if chosen.is_none() {
-                    let caller_parts: Vec<&str> = caller_id.split("::").collect();
-                    if caller_parts.len() >= 3 {
-                        let struct_prefix = format!("::{}::", caller_parts[caller_parts.len() - 2]);
-                        for m in &matches {
-                            if m.id.contains(&struct_prefix) {
-                                chosen = Some(m.id.clone());
-                                break;
-                            }
-                        }
-                    }
-                }
-
-                target_id = chosen.unwrap_or_else(|| matches[0].id.clone());
+        let candidates = match name_to_ids.get(simple_name) {
+            Some(ids) if !ids.is_empty() => ids,
+            _ => {
+                unresolved.push(UnresolvedRef {
+                    id: None,
+                    source_id: call.caller_id.clone(),
+                    specifier: call.callee_name.clone(),
+                    kind: "calls".to_string(),
+                    line: call.line,
+                    column: call.column,
+                });
+                continue;
             }
-        }
+        };
+
+        // Prefer a target defined in the caller's own file, else consider all matches.
+        let caller_file = id_to_file.get(&call.caller_id);
+        let same_file: Vec<&String> = candidates
+            .iter()
+            .filter(|id| id_to_file.get(*id) == caller_file && caller_file.is_some())
+            .collect();
+        let working_set: Vec<&String> = if !same_file.is_empty() {
+            same_file
+        } else {
+            candidates.iter().collect()
+        };
+
+        let target_id = if working_set.len() == 1 {
+            working_set[0].clone()
+        } else {
+            disambiguate(&working_set, &name_parts, &call.caller_id)
+                .unwrap_or_else(|| working_set[0].clone())
+        };
 
         edges.push(Edge {
-            source_id: caller_id,
+            source_id: call.caller_id.clone(),
             target_id,
             kind: "calls".to_string(),
         });
     }
 
-    // Deduplicate edges
     edges.sort_by(|a, b| {
         (&a.source_id, &a.target_id, &a.kind).cmp(&(&b.source_id, &b.target_id, &b.kind))
     });
@@ -122,7 +145,46 @@ pub fn parse_code(
         a.source_id == b.source_id && a.target_id == b.target_id && a.kind == b.kind
     });
 
-    Ok((nodes, edges))
+    (edges, unresolved)
+}
+
+/// Pick a target among several same-named candidates using namespace and
+/// receiver context. Case A: the call carries an explicit namespace
+/// (e.g. `Point::new`). Case B: fall back to the caller's own struct/class.
+fn disambiguate(candidates: &[&String], name_parts: &[&str], caller_id: &str) -> Option<String> {
+    // Case A: explicit namespace on the call target.
+    if name_parts.len() >= 2 {
+        let ns_infix = format!("::{}::", name_parts[name_parts.len() - 2]);
+        if let Some(m) = candidates.iter().find(|id| id.contains(&ns_infix)) {
+            return Some((*m).clone());
+        }
+    }
+
+    // Case B: caller is a method/constructor — prefer a target on the same receiver.
+    let caller_parts: Vec<&str> = caller_id.split("::").collect();
+    if caller_parts.len() >= 3 {
+        let struct_prefix = format!("::{}::", caller_parts[caller_parts.len() - 2]);
+        if let Some(m) = candidates.iter().find(|id| id.contains(&struct_prefix)) {
+            return Some((*m).clone());
+        }
+    }
+
+    None
+}
+
+/// Resolve call sites against only the given `nodes` (single-file scope). A thin
+/// wrapper over [`resolve_calls_global`] used in tests and isolated parsing.
+pub fn resolve_calls_local(nodes: &[Node], calls: &[RawCall]) -> Vec<Edge> {
+    let mut name_to_ids: HashMap<String, Vec<String>> = HashMap::new();
+    let mut id_to_file: HashMap<String, String> = HashMap::new();
+    for n in nodes {
+        name_to_ids
+            .entry(n.name.clone())
+            .or_default()
+            .push(n.id.clone());
+        id_to_file.insert(n.id.clone(), n.file_path.clone());
+    }
+    resolve_calls_global(calls, &name_to_ids, &id_to_file).0
 }
 
 /// Recursively traverses a Rust AST.
@@ -132,7 +194,7 @@ fn traverse_rust<'a>(
     file_path: &str,
     current_impl_struct: Option<&str>,
     nodes: &mut Vec<Node>,
-    calls: &mut Vec<(String, String)>,
+    calls: &mut Vec<RawCall>,
     current_caller_id: Option<&str>,
 ) {
     let mut next_impl_struct = current_impl_struct;
@@ -295,7 +357,7 @@ fn traverse_rust<'a>(
             if let Some(caller) = current_caller_id {
                 if let Some(func_node) = node.child_by_field_name("function") {
                     let func_name = extract_rust_call_target(func_node, content);
-                    calls.push((caller.to_string(), func_name));
+                    calls.push(raw_call(caller, func_name, node));
                 }
             }
         }
@@ -306,7 +368,7 @@ fn traverse_rust<'a>(
                         .utf8_text(content.as_bytes())
                         .unwrap_or("")
                         .to_string();
-                    calls.push((caller.to_string(), method_name));
+                    calls.push(raw_call(caller, method_name, node));
                 }
             }
         }
@@ -358,7 +420,7 @@ fn traverse_go<'a>(
     content: &'a str,
     file_path: &str,
     nodes: &mut Vec<Node>,
-    calls: &mut Vec<(String, String)>,
+    calls: &mut Vec<RawCall>,
     current_caller_id: Option<&str>,
 ) {
     let mut next_caller_id = current_caller_id;
@@ -496,7 +558,7 @@ fn traverse_go<'a>(
             if let Some(caller) = current_caller_id {
                 if let Some(func_node) = node.child_by_field_name("function") {
                     let func_name = extract_go_call_target(func_node, content);
-                    calls.push((caller.to_string(), func_name));
+                    calls.push(raw_call(caller, func_name, node));
                 }
             }
         }
@@ -648,7 +710,7 @@ fn traverse_java<'a>(
     content: &'a str,
     file_path: &str,
     nodes: &mut Vec<Node>,
-    calls: &mut Vec<(String, String)>,
+    calls: &mut Vec<RawCall>,
     current_parent_qualified_name: Option<&str>,
     current_caller_id: Option<&str>,
 ) {
@@ -758,7 +820,7 @@ fn traverse_java<'a>(
                         .utf8_text(content.as_bytes())
                         .unwrap_or("")
                         .to_string();
-                    calls.push((caller.to_string(), method_name));
+                    calls.push(raw_call(caller, method_name, node));
                 }
             }
         }
@@ -769,7 +831,7 @@ fn traverse_java<'a>(
                         .utf8_text(content.as_bytes())
                         .unwrap_or("")
                         .to_string();
-                    calls.push((caller.to_string(), type_name));
+                    calls.push(raw_call(caller, type_name, node));
                 }
             }
         }
@@ -838,7 +900,8 @@ fn test_free_fn() {
 }
 "#;
 
-        let (nodes, edges) = parse_code("src/point.rs", rust_code, "rust").unwrap();
+        let (nodes, calls) = parse_code("src/point.rs", rust_code, "rust").unwrap();
+        let edges = resolve_calls_local(&nodes, &calls);
 
         // Let's assert nodes
         let struct_node = nodes
@@ -961,7 +1024,8 @@ func (p *Point) helper() {
 }
 "#;
 
-        let (nodes, edges) = parse_code("geometry.go", go_code, "go").unwrap();
+        let (nodes, calls) = parse_code("geometry.go", go_code, "go").unwrap();
+        let edges = resolve_calls_local(&nodes, &calls);
 
         // Assert nodes
         let struct_node = nodes
@@ -1068,7 +1132,8 @@ public class App {
 }
 "#;
 
-        let (nodes, edges) = parse_code("src/App.java", java_code, "java").unwrap();
+        let (nodes, calls) = parse_code("src/App.java", java_code, "java").unwrap();
+        let edges = resolve_calls_local(&nodes, &calls);
 
         // Find class node
         let class_node = nodes

@@ -11,6 +11,9 @@ use std::error::Error;
 struct Cli {
     #[command(subcommand)]
     command: Commands,
+    /// Emit machine-readable JSON results on stdout instead of human text
+    #[arg(long, global = true)]
+    json: bool,
 }
 
 #[derive(Subcommand, Debug)]
@@ -62,26 +65,40 @@ enum Commands {
     },
 }
 
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn Error>> {
+fn main() -> Result<(), Box<dyn Error>> {
     let cli = Cli::parse();
+
+    // Diagnostics (progress, warnings, errors) go to stderr via tracing so that
+    // stdout carries only command results — keeping `--json` output clean for agents.
+    // Verbosity is controlled by RUST_LOG (defaults to `info`).
+    tracing_subscriber::fmt()
+        .with_writer(std::io::stderr)
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+        )
+        .with_target(false)
+        .without_time()
+        .init();
+
     let current_dir = std::env::current_dir()?;
+    let json = cli.json;
 
     match cli.command {
         Commands::Init => {
             commands::run_init(&current_dir)?;
         }
         Commands::Status => {
-            commands::run_status(&current_dir)?;
+            commands::run_status(&current_dir, json)?;
         }
         Commands::Files => {
-            commands::run_files(&current_dir)?;
+            commands::run_files(&current_dir, json)?;
         }
         Commands::Search { query } => {
-            commands::run_search(&current_dir, &query)?;
+            commands::run_search(&current_dir, &query, json)?;
         }
         Commands::Callers { symbol } => {
-            commands::run_callers(&current_dir, &symbol)?;
+            commands::run_callers(&current_dir, &symbol, json)?;
         }
         Commands::Node {
             file,
@@ -101,10 +118,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 symbol,
                 include_code,
                 line,
+                json,
             )?;
         }
         Commands::Explore { query } => {
-            commands::run_explore(&current_dir, &query)?;
+            commands::run_explore(&current_dir, &query, json)?;
         }
     }
 

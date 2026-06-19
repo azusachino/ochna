@@ -1,13 +1,15 @@
 use crate::db;
 use crate::parser;
 use rusqlite::Connection;
+use serde_json::json;
 use std::collections::hash_map::DefaultHasher;
 use std::error::Error;
 use std::fs;
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
+use tracing::{debug, error, info, warn};
 
-/// Recursively scans `current_dir` for `.rs` and `.go` files.
+/// Recursively scans `current_dir` for `.rs`, `.go`, and `.java` files.
 /// Relative paths are calculated with respect to `base_dir`.
 fn scan_dir(base_dir: &Path, current_dir: &Path, files: &mut Vec<PathBuf>) -> std::io::Result<()> {
     if current_dir.is_dir() {
@@ -46,10 +48,7 @@ fn calculate_hash(content: &str) -> String {
     format!("{:x}", s.finish())
 }
 
-/// The `init` command:
-/// - Creates a `.codegraph/` directory in the workspace.
-/// - Opens/creates the SQLite database at `.codegraph/codegraph.db`.
-/// - Initializes the schema.
+/// Returns true if a node with the given id already exists in the database.
 fn node_exists(conn: &Connection, node_id: &str) -> Result<bool, rusqlite::Error> {
     let count: i64 = conn.query_row(
         "SELECT COUNT(*) FROM nodes WHERE id = ?",
@@ -119,8 +118,9 @@ fn get_git_info(
 /// - Creates a `.ochna/` directory in the workspace.
 /// - Opens/creates the SQLite database at `.ochna/ochna.db`.
 /// - Initializes the schema.
-/// - Recursively scans for `.rs` and `.go` files.
+/// - Recursively scans for `.rs`, `.go`, and `.java` files.
 /// - Computes hashes, and updates database for new/modified files.
+/// - Resolves call edges across files and records unmatched calls as unresolved refs.
 pub fn run_init(workspace: &Path) -> Result<(), Box<dyn Error>> {
     let ochna_dir = workspace.join(".ochna");
     if !ochna_dir.exists() {
@@ -128,27 +128,29 @@ pub fn run_init(workspace: &Path) -> Result<(), Box<dyn Error>> {
     }
 
     let db_path = ochna_dir.join("ochna.db");
-    let conn = Connection::open(&db_path)?;
+    let mut conn = Connection::open(&db_path)?;
     db::init_schema(&conn)?;
+
+    let tx = conn.transaction()?;
 
     let mut files = Vec::new();
     scan_dir(workspace, workspace, &mut files)?;
 
     // Prune files that are no longer on disk
-    let mut stmt = conn.prepare("SELECT file_path FROM files")?;
-    let db_files: Result<Vec<String>, _> = stmt.query_map([], |row| row.get(0))?.collect();
-    let db_files = db_files?;
-    for db_file in db_files {
-        let exists = files.iter().any(|f| f.to_string_lossy() == db_file);
-        if !exists {
-            println!("Pruning deleted file from index: {}", db_file);
-            db::delete_file_data(&conn, &db_file)?;
+    {
+        let mut stmt = tx.prepare("SELECT file_path FROM files")?;
+        let db_files: Result<Vec<String>, _> = stmt.query_map([], |row| row.get(0))?.collect();
+        let db_files = db_files?;
+        for db_file in db_files {
+            let exists = files.iter().any(|f| f.to_string_lossy() == db_file);
+            if !exists {
+                info!("Pruning deleted file from index: {}", db_file);
+                db::delete_file_data(&tx, &db_file)?;
+            }
         }
     }
 
-    println!("Found {} source files to index.", files.len());
-
-    let mut pending_edges = Vec::new();
+    info!("Found {} source files to index.", files.len());
 
     for file_path in files {
         let absolute_path = workspace.join(&file_path);
@@ -164,11 +166,7 @@ pub fn run_init(workspace: &Path) -> Result<(), Box<dyn Error>> {
         let content = match fs::read_to_string(&absolute_path) {
             Ok(c) => c,
             Err(e) => {
-                eprintln!(
-                    "Warning: Could not read file {}: {}",
-                    file_path.display(),
-                    e
-                );
+                warn!("Could not read file {}: {}", file_path.display(), e);
                 continue;
             }
         };
@@ -176,7 +174,7 @@ pub fn run_init(workspace: &Path) -> Result<(), Box<dyn Error>> {
         let current_hash = calculate_hash(&content);
         let relative_path_str = file_path.to_string_lossy().to_string();
 
-        let existing = db::get_file_metadata(&conn, &relative_path_str)?;
+        let existing = db::get_file_metadata(&tx, &relative_path_str)?;
 
         let is_modified = match existing {
             None => true,
@@ -188,8 +186,8 @@ pub fn run_init(workspace: &Path) -> Result<(), Box<dyn Error>> {
         };
 
         if is_modified {
-            println!("Indexing: {}", relative_path_str);
-            db::delete_file_data(&conn, &relative_path_str)?;
+            debug!("Indexing: {}", relative_path_str);
+            db::delete_file_data(&tx, &relative_path_str)?;
 
             let language = if relative_path_str.ends_with(".rs") {
                 "rust"
@@ -202,11 +200,13 @@ pub fn run_init(workspace: &Path) -> Result<(), Box<dyn Error>> {
             };
 
             match parser::parse_code(&relative_path_str, &content, language) {
-                Ok((nodes, edges)) => {
+                Ok((nodes, calls)) => {
                     for node in &nodes {
-                        db::upsert_node(&conn, node)?;
+                        db::upsert_node(&tx, node)?;
                     }
-                    pending_edges.extend(edges);
+                    for call in &calls {
+                        db::insert_raw_call(&tx, call)?;
+                    }
                     let file_meta = db::FileMetadata {
                         file_path: relative_path_str,
                         content_hash: current_hash,
@@ -214,69 +214,103 @@ pub fn run_init(workspace: &Path) -> Result<(), Box<dyn Error>> {
                         size_bytes: Some(size_bytes),
                         last_modified: Some(last_modified),
                     };
-                    db::upsert_file_metadata(&conn, &file_meta)?;
+                    db::upsert_file_metadata(&tx, &file_meta)?;
                 }
                 Err(e) => {
-                    eprintln!("Error parsing {}: {}", relative_path_str, e);
+                    error!("Error parsing {}: {}", relative_path_str, e);
                 }
             }
         } else {
-            println!("Up to date: {}", relative_path_str);
+            debug!("Up to date: {}", relative_path_str);
         }
     }
 
-    // Defer edge inserting until all nodes are present in the database to satisfy FK constraints.
-    for edge in pending_edges {
-        if node_exists(&conn, &edge.source_id)? && node_exists(&conn, &edge.target_id)? {
-            db::upsert_edge(&conn, &edge)?;
+    // Clear old resolved edges and unresolved references
+    tx.execute("DELETE FROM edges", [])?;
+    tx.execute("DELETE FROM unresolved_refs", [])?;
+
+    // Load all raw calls currently in the database to re-resolve them globally
+    let all_calls = db::get_all_raw_calls(&tx)?;
+
+    use std::collections::HashMap;
+    let mut name_to_ids: HashMap<String, Vec<String>> = HashMap::new();
+    let mut id_to_file: HashMap<String, String> = HashMap::new();
+    {
+        let mut stmt = tx.prepare("SELECT id, name, file_path FROM nodes")?;
+        let mut rows = stmt.query([])?;
+        while let Some(row) = rows.next()? {
+            let id: String = row.get(0)?;
+            let name: String = row.get(1)?;
+            let file: String = row.get(2)?;
+            name_to_ids.entry(name).or_default().push(id.clone());
+            id_to_file.insert(id, file);
         }
     }
+
+    let (edges, unresolved) = parser::resolve_calls_global(&all_calls, &name_to_ids, &id_to_file);
+    let edge_count = edges.len();
+
+    // Edges reference existing nodes by construction, but guard against races/FK anyway.
+    for edge in edges {
+        if node_exists(&tx, &edge.source_id)? && node_exists(&tx, &edge.target_id)? {
+            db::upsert_edge(&tx, &edge)?;
+        }
+    }
+    for uref in &unresolved {
+        db::insert_unresolved_ref(&tx, uref)?;
+    }
+    info!(
+        "Resolved {} call edges; {} unresolved references recorded.",
+        edge_count,
+        unresolved.len()
+    );
 
     // Save Git baseline info & indexing timestamp
     let (git_sha, git_subject, git_date, git_branch, git_status) = get_git_info(workspace);
-    db::upsert_project_metadata(&conn, "git_commit_sha", git_sha.as_deref())?;
-    db::upsert_project_metadata(&conn, "git_commit_subject", git_subject.as_deref())?;
-    db::upsert_project_metadata(&conn, "git_commit_date", git_date.as_deref())?;
-    db::upsert_project_metadata(&conn, "git_branch", git_branch.as_deref())?;
-    db::upsert_project_metadata(&conn, "git_status", git_status.as_deref())?;
+    db::upsert_project_metadata(&tx, "git_commit_sha", git_sha.as_deref())?;
+    db::upsert_project_metadata(&tx, "git_commit_subject", git_subject.as_deref())?;
+    db::upsert_project_metadata(&tx, "git_commit_date", git_date.as_deref())?;
+    db::upsert_project_metadata(&tx, "git_branch", git_branch.as_deref())?;
+    db::upsert_project_metadata(&tx, "git_status", git_status.as_deref())?;
 
     let indexed_at = std::process::Command::new("date")
         .output()
         .ok()
         .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
         .unwrap_or_else(|| "Unknown".to_string());
-    db::upsert_project_metadata(&conn, "indexed_at", Some(&indexed_at))?;
+    db::upsert_project_metadata(&tx, "indexed_at", Some(&indexed_at))?;
 
-    println!("Indexing completed successfully.");
-    println!("Project Baseline Info:");
-    println!(
+    tx.commit()?;
+
+    info!("Indexing completed successfully.");
+    info!(
         "  Commit SHA:  {}",
         git_sha.unwrap_or_else(|| "N/A".to_string())
     );
-    println!(
+    info!(
         "  Commit Msg:  {}",
         git_subject.unwrap_or_else(|| "N/A".to_string())
     );
-    println!(
+    info!(
         "  Commit Date: {}",
         git_date.unwrap_or_else(|| "N/A".to_string())
     );
-    println!(
+    info!(
         "  Branch:      {}",
         git_branch.unwrap_or_else(|| "N/A".to_string())
     );
-    println!(
+    info!(
         "  Git Status:  {}",
         git_status.unwrap_or_else(|| "N/A".to_string())
     );
-    println!("  Indexed At:  {}", indexed_at);
+    info!("  Indexed At:  {}", indexed_at);
 
     Ok(())
 }
 
 /// The `status` command:
 /// - Displays statistics: number of files, nodes, and edges currently indexed in the database.
-pub fn run_status(workspace: &Path) -> Result<(), Box<dyn Error>> {
+pub fn run_status(workspace: &Path, json: bool) -> Result<(), Box<dyn Error>> {
     let db_path = workspace.join(".ochna").join("ochna.db");
     if !db_path.exists() {
         return Err("Database not initialized. Run the 'init' command first.".into());
@@ -301,6 +335,24 @@ pub fn run_status(workspace: &Path) -> Result<(), Box<dyn Error>> {
     let indexed_at =
         db::get_project_metadata(&conn, "indexed_at")?.unwrap_or_else(|| "N/A".to_string());
 
+    if json {
+        let out = json!({
+            "files": files_count,
+            "nodes": nodes_count,
+            "edges": edges_count,
+            "git": {
+                "commit_sha": git_commit_sha,
+                "commit_subject": git_commit_subject,
+                "commit_date": git_commit_date,
+                "branch": git_branch,
+                "status": git_status,
+            },
+            "indexed_at": indexed_at,
+        });
+        println!("{}", serde_json::to_string_pretty(&out)?);
+        return Ok(());
+    }
+
     println!("Database Status:");
     println!("  Files: {}", files_count);
     println!("  Nodes: {}", nodes_count);
@@ -319,7 +371,7 @@ pub fn run_status(workspace: &Path) -> Result<(), Box<dyn Error>> {
 
 /// The `files` command:
 /// - Prints a list of indexed files with symbol count, language, and size.
-pub fn run_files(workspace: &Path) -> Result<(), Box<dyn Error>> {
+pub fn run_files(workspace: &Path, json: bool) -> Result<(), Box<dyn Error>> {
     let db_path = workspace.join(".ochna").join("ochna.db");
     if !db_path.exists() {
         return Err("Database not initialized. Run the 'init' command first.".into());
@@ -335,7 +387,27 @@ pub fn run_files(workspace: &Path) -> Result<(), Box<dyn Error>> {
          ORDER BY f.file_path",
     )?;
 
-    let mut rows = stmt.query([])?;
+    let rows: Vec<(String, Option<String>, Option<i64>, i64)> = stmt
+        .query_map([], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+        })?
+        .collect::<rusqlite::Result<_>>()?;
+
+    if json {
+        let files: Vec<_> = rows
+            .iter()
+            .map(|(path, lang, size, count)| {
+                json!({
+                    "file_path": path,
+                    "language": lang,
+                    "size_bytes": size,
+                    "symbols": count,
+                })
+            })
+            .collect();
+        println!("{}", serde_json::to_string_pretty(&files)?);
+        return Ok(());
+    }
 
     println!(
         "{:<40} {:<10} {:<10} {:<12}",
@@ -343,12 +415,7 @@ pub fn run_files(workspace: &Path) -> Result<(), Box<dyn Error>> {
     );
     println!("{}", "-".repeat(76));
 
-    while let Some(row) = rows.next()? {
-        let path: String = row.get(0)?;
-        let lang: Option<String> = row.get(1)?;
-        let size: Option<i64> = row.get(2)?;
-        let symbol_count: i64 = row.get(3)?;
-
+    for (path, lang, size, symbol_count) in rows {
         let lang_str = lang.unwrap_or_else(|| "unknown".to_string());
         let size_str = size
             .map(|s| s.to_string())
@@ -415,13 +482,50 @@ fn query_nodes_by_id_or_qual(conn: &Connection, symbol: &str) -> rusqlite::Resul
     Ok(nodes)
 }
 
-pub fn run_search(workspace: &Path, query: &str) -> Result<(), Box<dyn Error>> {
+/// Open the workspace database, returning a clear error if it has not been indexed.
+fn open_db(workspace: &Path) -> Result<Connection, Box<dyn Error>> {
     let db_path = workspace.join(".ochna").join("ochna.db");
     if !db_path.exists() {
-        println!("ochna database not found. Please run 'ochna init' to index the workspace.");
-        std::process::exit(1);
+        return Err("ochna database not found. Run 'ochna init' to index the workspace.".into());
     }
-    let conn = Connection::open(&db_path)?;
+    Ok(Connection::open(&db_path)?)
+}
+
+/// Emit a list of nodes: pretty JSON when `json`, otherwise one human line each.
+fn emit_nodes(nodes: &[db::Node], json: bool, empty_msg: &str) -> Result<(), Box<dyn Error>> {
+    if json {
+        println!("{}", serde_json::to_string_pretty(nodes)?);
+    } else if nodes.is_empty() {
+        println!("{}", empty_msg);
+    } else {
+        for n in nodes {
+            println!(
+                "- {} ({}) - {}:{}",
+                n.name, n.kind, n.file_path, n.start_line
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Read a node's source lines as `{line, text}` records, or `None` if unreadable.
+fn read_code_lines(workspace: &Path, node: &db::Node) -> Option<Vec<serde_json::Value>> {
+    let abs_path = workspace.join(&node.file_path);
+    let content = fs::read_to_string(&abs_path).ok()?;
+    let lines: Vec<&str> = content.lines().collect();
+    let total = lines.len() as i64;
+    let start = node.start_line.max(1);
+    let end = node.end_line.min(total);
+    Some(
+        (start..=end)
+            .filter(|&idx| idx <= total)
+            .map(|idx| json!({ "line": idx, "text": lines[(idx - 1) as usize] }))
+            .collect(),
+    )
+}
+
+pub fn run_search(workspace: &Path, query: &str, json: bool) -> Result<(), Box<dyn Error>> {
+    let conn = open_db(workspace)?;
 
     // Try FTS first
     let mut nodes = db::search_nodes_fts(&conn, query).unwrap_or_default();
@@ -441,27 +545,11 @@ pub fn run_search(workspace: &Path, query: &str) -> Result<(), Box<dyn Error>> {
         }
     }
 
-    if nodes.is_empty() {
-        println!("No matching nodes found.");
-        return Ok(());
-    }
-
-    for n in nodes {
-        println!(
-            "- {} ({}) - {}:{}",
-            n.name, n.kind, n.file_path, n.start_line
-        );
-    }
-    Ok(())
+    emit_nodes(&nodes, json, "No matching nodes found.")
 }
 
-pub fn run_callers(workspace: &Path, symbol: &str) -> Result<(), Box<dyn Error>> {
-    let db_path = workspace.join(".ochna").join("ochna.db");
-    if !db_path.exists() {
-        println!("ochna database not found. Please run 'ochna init' to index the workspace.");
-        std::process::exit(1);
-    }
-    let conn = Connection::open(&db_path)?;
+pub fn run_callers(workspace: &Path, symbol: &str, json: bool) -> Result<(), Box<dyn Error>> {
+    let conn = open_db(workspace)?;
 
     // Find nodes matching the symbol name or symbol ID
     let mut target_nodes = db::query_nodes(&conn, Some(symbol), None, None).unwrap_or_default();
@@ -474,8 +562,11 @@ pub fn run_callers(workspace: &Path, symbol: &str) -> Result<(), Box<dyn Error>>
     }
 
     if target_nodes.is_empty() {
-        println!("Symbol '{}' not found in database.", symbol);
-        return Ok(());
+        return emit_nodes(
+            &[],
+            json,
+            &format!("Symbol '{}' not found in database.", symbol),
+        );
     }
 
     let mut callers = Vec::new();
@@ -485,22 +576,11 @@ pub fn run_callers(workspace: &Path, symbol: &str) -> Result<(), Box<dyn Error>>
         }
     }
 
-    if callers.is_empty() {
-        println!("No callers found.");
-        return Ok(());
-    }
-
     // Deduplicate callers
     callers.sort_by(|a, b| a.id.cmp(&b.id));
     callers.dedup_by(|a, b| a.id == b.id);
 
-    for c in callers {
-        println!(
-            "- {} ({}) - {}:{}",
-            c.name, c.kind, c.file_path, c.start_line
-        );
-    }
-    Ok(())
+    emit_nodes(&callers, json, "No callers found.")
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -513,13 +593,9 @@ pub fn run_node(
     symbol: Option<String>,
     include_code: bool,
     line: Option<i64>,
+    json: bool,
 ) -> Result<(), Box<dyn Error>> {
-    let db_path = workspace.join(".ochna").join("ochna.db");
-    if !db_path.exists() {
-        println!("ochna database not found. Please run 'ochna init' to index the workspace.");
-        std::process::exit(1);
-    }
-    let conn = Connection::open(&db_path)?;
+    let conn = open_db(workspace)?;
 
     match (file, symbol) {
         (Some(file_path), None) => {
@@ -531,6 +607,9 @@ pub fn run_node(
             };
 
             if symbols_only {
+                if json {
+                    return emit_nodes(&file_nodes, true, "");
+                }
                 if file_nodes.is_empty() {
                     println!("No symbols found for file '{}'.", file_path);
                     return Ok(());
@@ -549,10 +628,7 @@ pub fn run_node(
             let abs_path = workspace.join(&file_path);
             let file_content = match fs::read_to_string(&abs_path) {
                 Ok(content) => content,
-                Err(e) => {
-                    println!("Error: Could not read file '{}': {}", file_path, e);
-                    return Ok(());
-                }
+                Err(e) => return Err(format!("Could not read file '{}': {}", file_path, e).into()),
             };
 
             let file_lines: Vec<&str> = file_content.lines().collect();
@@ -564,16 +640,6 @@ pub fn run_node(
                 Some(lim) => (start + lim).min(total_lines),
                 None => total_lines,
             };
-
-            println!(
-                "File content of {} (lines {} to {}):",
-                file_path, start, end
-            );
-            for idx in start..=end {
-                if idx <= total_lines {
-                    println!("{}\t{}", idx, file_lines[(idx - 1) as usize]);
-                }
-            }
 
             // Query dependents (external callers calling nodes defined in this file)
             let mut dependents = Vec::new();
@@ -588,6 +654,32 @@ pub fn run_node(
             }
             dependents.sort_by(|a, b| a.id.cmp(&b.id));
             dependents.dedup_by(|a, b| a.id == b.id);
+
+            if json {
+                let lines: Vec<_> = (start..=end)
+                    .filter(|&idx| idx <= total_lines)
+                    .map(|idx| json!({ "line": idx, "text": file_lines[(idx - 1) as usize] }))
+                    .collect();
+                let out = json!({
+                    "file_path": file_path,
+                    "start_line": start,
+                    "end_line": end,
+                    "lines": lines,
+                    "dependents": dependents,
+                });
+                println!("{}", serde_json::to_string_pretty(&out)?);
+                return Ok(());
+            }
+
+            println!(
+                "File content of {} (lines {} to {}):",
+                file_path, start, end
+            );
+            for idx in start..=end {
+                if idx <= total_lines {
+                    println!("{}\t{}", idx, file_lines[(idx - 1) as usize]);
+                }
+            }
 
             println!("\nDependents:");
             if dependents.is_empty() {
@@ -611,20 +703,42 @@ pub fn run_node(
                 }
             }
 
+            if let Some(target_line) = line {
+                target_nodes.retain(|n| target_line >= n.start_line && target_line <= n.end_line);
+            }
+
             if target_nodes.is_empty() {
+                if json {
+                    println!("[]");
+                    return Ok(());
+                }
                 println!("Symbol '{}' not found in database.", symbol_name);
                 return Ok(());
             }
 
-            if let Some(target_line) = line {
-                target_nodes.retain(|n| target_line >= n.start_line && target_line <= n.end_line);
-                if target_nodes.is_empty() {
-                    println!(
-                        "Symbol '{}' not found in database on line {}.",
-                        symbol_name, target_line
-                    );
-                    return Ok(());
+            if json {
+                let mut out = Vec::new();
+                for node in &target_nodes {
+                    let code = if include_code {
+                        read_code_lines(workspace, node)
+                    } else {
+                        None
+                    };
+                    let mut callers = db::find_callers(&conn, &node.id, None).unwrap_or_default();
+                    callers.sort_by(|a, b| a.id.cmp(&b.id));
+                    callers.dedup_by(|a, b| a.id == b.id);
+                    let mut callees = db::find_callees(&conn, &node.id, None).unwrap_or_default();
+                    callees.sort_by(|a, b| a.id.cmp(&b.id));
+                    callees.dedup_by(|a, b| a.id == b.id);
+                    out.push(json!({
+                        "symbol": node,
+                        "code": code,
+                        "callers": callers,
+                        "callees": callees,
+                    }));
                 }
+                println!("{}", serde_json::to_string_pretty(&out)?);
+                return Ok(());
             }
 
             let mut results = Vec::new();
@@ -706,20 +820,15 @@ pub fn run_node(
             println!("{}", results.join("\n\n---\n\n"));
         }
         _ => {
-            println!("Error: specify exactly one of '--file' or '--symbol'.");
+            return Err("specify exactly one of '--file' or '--symbol'.".into());
         }
     }
 
     Ok(())
 }
 
-pub fn run_explore(workspace: &Path, query: &str) -> Result<(), Box<dyn Error>> {
-    let db_path = workspace.join(".ochna").join("ochna.db");
-    if !db_path.exists() {
-        println!("ochna database not found. Please run 'ochna init' to index the workspace.");
-        std::process::exit(1);
-    }
-    let conn = Connection::open(&db_path)?;
+pub fn run_explore(workspace: &Path, query: &str, json: bool) -> Result<(), Box<dyn Error>> {
+    let conn = open_db(workspace)?;
 
     // Find matching nodes (using search logic)
     let mut nodes = db::search_nodes_fts(&conn, query).unwrap_or_default();
@@ -736,7 +845,11 @@ pub fn run_explore(workspace: &Path, query: &str) -> Result<(), Box<dyn Error>> 
     }
 
     if nodes.is_empty() {
-        println!("No matching nodes found to explore.");
+        if json {
+            println!("[]");
+        } else {
+            println!("No matching nodes found to explore.");
+        }
         return Ok(());
     }
 
@@ -748,6 +861,30 @@ pub fn run_explore(workspace: &Path, query: &str) -> Result<(), Box<dyn Error>> 
             .entry(n.file_path.clone())
             .or_default()
             .push(n);
+    }
+
+    if json {
+        let mut out = Vec::new();
+        for (file_path, file_nodes) in &files_to_nodes {
+            let mut symbols = Vec::new();
+            for node in file_nodes {
+                let mut callers = db::find_callers(&conn, &node.id, None).unwrap_or_default();
+                callers.sort_by(|a, b| a.id.cmp(&b.id));
+                callers.dedup_by(|a, b| a.id == b.id);
+                let mut callees = db::find_callees(&conn, &node.id, None).unwrap_or_default();
+                callees.sort_by(|a, b| a.id.cmp(&b.id));
+                callees.dedup_by(|a, b| a.id == b.id);
+                symbols.push(json!({
+                    "symbol": node,
+                    "code": read_code_lines(workspace, node),
+                    "callers": callers,
+                    "callees": callees,
+                }));
+            }
+            out.push(json!({ "file_path": file_path, "symbols": symbols }));
+        }
+        println!("{}", serde_json::to_string_pretty(&out)?);
+        return Ok(());
     }
 
     let mut output = Vec::new();
@@ -901,15 +1038,19 @@ mod tests {
         // Total nodes: 3
         assert_eq!(nodes_count, 3);
 
-        // Run status command and verify it succeeds
-        run_status(&temp_workspace).unwrap();
+        // Run status command and verify it succeeds (text + json)
+        run_status(&temp_workspace, false).unwrap();
+        run_status(&temp_workspace, true).unwrap();
 
-        // Run files command and verify it succeeds
-        run_files(&temp_workspace).unwrap();
+        // Run files command and verify it succeeds (text + json)
+        run_files(&temp_workspace, false).unwrap();
+        run_files(&temp_workspace, true).unwrap();
 
         // Verify new query commands query the SQLite database successfully and print expected output formats
-        run_search(&temp_workspace, "helper").unwrap();
-        run_callers(&temp_workspace, "helper").unwrap();
+        run_search(&temp_workspace, "helper", false).unwrap();
+        run_search(&temp_workspace, "helper", true).unwrap();
+        run_callers(&temp_workspace, "helper", false).unwrap();
+        run_callers(&temp_workspace, "helper", true).unwrap();
 
         // Test run_node with file (symbols_only = false)
         run_node(
@@ -921,6 +1062,7 @@ mod tests {
             None,
             false,
             None,
+            false,
         )
         .unwrap();
         // Test run_node with file (symbols_only = true)
@@ -933,6 +1075,7 @@ mod tests {
             None,
             false,
             None,
+            false,
         )
         .unwrap();
         // Test run_node with symbol (include_code = true)
@@ -945,6 +1088,20 @@ mod tests {
             Some("helper".to_string()),
             true,
             None,
+            false,
+        )
+        .unwrap();
+        // Test run_node with symbol (include_code = true, JSON output)
+        run_node(
+            &temp_workspace,
+            None,
+            None,
+            None,
+            false,
+            Some("helper".to_string()),
+            true,
+            None,
+            true,
         )
         .unwrap();
         // Test run_node with symbol (include_code = true and line filtering)
@@ -957,11 +1114,13 @@ mod tests {
             Some("helper".to_string()),
             true,
             Some(6),
+            false,
         )
         .unwrap();
 
-        // Test run_explore
-        run_explore(&temp_workspace, "helper").unwrap();
+        // Test run_explore (text + json)
+        run_explore(&temp_workspace, "helper", false).unwrap();
+        run_explore(&temp_workspace, "helper", true).unwrap();
 
         // 3. Modify a file and check that re-indexing works
         let rust_code_modified = r#"
@@ -982,6 +1141,51 @@ mod tests {
         assert_eq!(nodes_count_after, 2);
 
         // Clean up temporary workspace
+        fs::remove_dir_all(&temp_workspace).unwrap();
+    }
+
+    #[test]
+    fn test_cross_file_edges_and_unresolved() {
+        let temp_workspace = create_temp_dir();
+        let src_dir = temp_workspace.join("src");
+        fs::create_dir_all(&src_dir).unwrap();
+
+        // a.rs calls target() (defined in b.rs) and missing() (defined nowhere).
+        fs::write(
+            src_dir.join("a.rs"),
+            "fn caller() {\n    target();\n    missing();\n}\n",
+        )
+        .unwrap();
+        fs::write(src_dir.join("b.rs"), "fn target() {}\n").unwrap();
+
+        run_init(&temp_workspace).unwrap();
+
+        let db_path = temp_workspace.join(".ochna").join("ochna.db");
+        let conn = Connection::open(&db_path).unwrap();
+
+        // A call edge must cross the file boundary: src/a.rs::caller -> src/b.rs::target.
+        let cross_file: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM edges e \
+                 JOIN nodes s ON e.source_id = s.id \
+                 JOIN nodes t ON e.target_id = t.id \
+                 WHERE s.file_path <> t.file_path",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(cross_file, 1, "expected one cross-file call edge");
+
+        // The call to an unindexed symbol must be recorded as an unresolved reference.
+        let unresolved: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM unresolved_refs WHERE specifier = 'missing'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(unresolved, 1, "expected one unresolved reference");
+
         fs::remove_dir_all(&temp_workspace).unwrap();
     }
 }

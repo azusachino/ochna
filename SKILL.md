@@ -5,9 +5,11 @@ description: Use the ochna CLI to index, search, explore, and trace code call-gr
 
 # ochna CLI Playbook
 
-`ochna` is a local codebase intelligence CLI. It parses Java, Rust, and Go files using Tree-sitter AST, indexes them in SQLite, and provides direct query commands.
+`ochna` is a local codebase intelligence CLI. It parses Java, Rust, and Go files using Tree-sitter AST, indexes them in SQLite, and provides direct query commands. Call edges are resolved **across files**, so `callers`/`callees` trace the whole-project call graph; calls to symbols outside the index are recorded as unresolved references rather than dropped.
 
 Use `ochna` BEFORE resorting to standard tools like `rg` or `view_file`.
+
+**Machine-readable output**: every query command accepts a global `--json` flag that emits structured JSON on stdout (full node records with `id`, `qualified_name`, `signature`, line/column spans, plus callers/callees). Diagnostics and progress go to stderr, so `--json` stdout is always clean to parse. Prefer `--json` when consuming output programmatically. Verbosity is controlled by `RUST_LOG` (default `info`).
 
 ## Commands Reference
 
