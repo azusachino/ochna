@@ -30,7 +30,7 @@ echo
 
 # 1. Cold Start Indexing
 echo "--- 1. Cold Start Indexing (Full parse & write) ---"
-hyperfine --prepare "rm -rf $TARGET_DIR/.codegraph" --runs 3 \
+hyperfine --prepare "rm -rf $TARGET_DIR/.ochna" --runs 3 \
     "cd $TARGET_DIR && $OCHNA init"
 echo
 

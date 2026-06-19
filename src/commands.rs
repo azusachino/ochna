@@ -107,18 +107,18 @@ fn get_git_info(workspace: &Path) -> (Option<String>, Option<String>, Option<Str
 }
 
 /// The `init` command:
-/// - Creates a `.codegraph/` directory in the workspace.
-/// - Opens/creates the SQLite database at `.codegraph/codegraph.db`.
+/// - Creates a `.ochna/` directory in the workspace.
+/// - Opens/creates the SQLite database at `.ochna/ochna.db`.
 /// - Initializes the schema.
 /// - Recursively scans for `.rs` and `.go` files.
 /// - Computes hashes, and updates database for new/modified files.
 pub fn run_init(workspace: &Path) -> Result<(), Box<dyn Error>> {
-    let codegraph_dir = workspace.join(".codegraph");
-    if !codegraph_dir.exists() {
-        fs::create_dir_all(&codegraph_dir)?;
+    let ochna_dir = workspace.join(".ochna");
+    if !ochna_dir.exists() {
+        fs::create_dir_all(&ochna_dir)?;
     }
 
-    let db_path = codegraph_dir.join("codegraph.db");
+    let db_path = ochna_dir.join("ochna.db");
     let conn = Connection::open(&db_path)?;
     db::init_schema(&conn)?;
 
@@ -253,7 +253,7 @@ pub fn run_init(workspace: &Path) -> Result<(), Box<dyn Error>> {
 /// The `status` command:
 /// - Displays statistics: number of files, nodes, and edges currently indexed in the database.
 pub fn run_status(workspace: &Path) -> Result<(), Box<dyn Error>> {
-    let db_path = workspace.join(".codegraph").join("codegraph.db");
+    let db_path = workspace.join(".ochna").join("ochna.db");
     if !db_path.exists() {
         return Err("Database not initialized. Run the 'init' command first.".into());
     }
@@ -290,7 +290,7 @@ pub fn run_status(workspace: &Path) -> Result<(), Box<dyn Error>> {
 /// The `files` command:
 /// - Prints a list of indexed files with symbol count, language, and size.
 pub fn run_files(workspace: &Path) -> Result<(), Box<dyn Error>> {
-    let db_path = workspace.join(".codegraph").join("codegraph.db");
+    let db_path = workspace.join(".ochna").join("ochna.db");
     if !db_path.exists() {
         return Err("Database not initialized. Run the 'init' command first.".into());
     }
@@ -386,9 +386,9 @@ fn query_nodes_by_id_or_qual(conn: &Connection, symbol: &str) -> rusqlite::Resul
 }
 
 pub fn run_search(workspace: &Path, query: &str) -> Result<(), Box<dyn Error>> {
-    let db_path = workspace.join(".codegraph").join("codegraph.db");
+    let db_path = workspace.join(".ochna").join("ochna.db");
     if !db_path.exists() {
-        println!("CodeGraph database not found. Please run 'ochna init' to index the workspace.");
+        println!("ochna database not found. Please run 'ochna init' to index the workspace.");
         std::process::exit(1);
     }
     let conn = Connection::open(&db_path)?;
@@ -426,9 +426,9 @@ pub fn run_search(workspace: &Path, query: &str) -> Result<(), Box<dyn Error>> {
 }
 
 pub fn run_callers(workspace: &Path, symbol: &str) -> Result<(), Box<dyn Error>> {
-    let db_path = workspace.join(".codegraph").join("codegraph.db");
+    let db_path = workspace.join(".ochna").join("ochna.db");
     if !db_path.exists() {
-        println!("CodeGraph database not found. Please run 'ochna init' to index the workspace.");
+        println!("ochna database not found. Please run 'ochna init' to index the workspace.");
         std::process::exit(1);
     }
     let conn = Connection::open(&db_path)?;
@@ -484,9 +484,9 @@ pub fn run_node(
     include_code: bool,
     line: Option<i64>,
 ) -> Result<(), Box<dyn Error>> {
-    let db_path = workspace.join(".codegraph").join("codegraph.db");
+    let db_path = workspace.join(".ochna").join("ochna.db");
     if !db_path.exists() {
-        println!("CodeGraph database not found. Please run 'ochna init' to index the workspace.");
+        println!("ochna database not found. Please run 'ochna init' to index the workspace.");
         std::process::exit(1);
     }
     let conn = Connection::open(&db_path)?;
@@ -683,9 +683,9 @@ pub fn run_node(
 }
 
 pub fn run_explore(workspace: &Path, query: &str) -> Result<(), Box<dyn Error>> {
-    let db_path = workspace.join(".codegraph").join("codegraph.db");
+    let db_path = workspace.join(".ochna").join("ochna.db");
     if !db_path.exists() {
-        println!("CodeGraph database not found. Please run 'ochna init' to index the workspace.");
+        println!("ochna database not found. Please run 'ochna init' to index the workspace.");
         std::process::exit(1);
     }
     let conn = Connection::open(&db_path)?;
@@ -849,8 +849,8 @@ mod tests {
         // 2. Run run_init
         run_init(&temp_workspace).unwrap();
 
-        // Verify .codegraph/codegraph.db was created
-        let db_path = temp_workspace.join(".codegraph").join("codegraph.db");
+        // Verify .ochna/ochna.db was created
+        let db_path = temp_workspace.join(".ochna").join("ochna.db");
         assert!(db_path.exists());
 
         // Verify status fetches expected data

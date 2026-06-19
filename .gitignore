@@ -2,8 +2,8 @@
 /target
 /Cargo.lock
 
-# CodeGraph
-/.codegraph
+# ochna
+/.ochna
 
 # IDEs and OS
 .idea/

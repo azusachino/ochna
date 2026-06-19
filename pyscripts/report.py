@@ -9,7 +9,7 @@ import sqlite3
 import sys
 
 def main():
-    db_path = os.path.join(".codegraph", "codegraph.db")
+    db_path = os.path.join(".ochna", "ochna.db")
     if not os.path.exists(db_path):
         print(f"Error: ochna database not found at {db_path}", file=sys.stderr)
         print("Please run 'ochna init' to index the workspace first.", file=sys.stderr)
@@ -29,7 +29,6 @@ def main():
         metadata = dict(cursor.fetchall())
         if metadata:
             for k, v in metadata.items():
-                # Clean up formatting
                 name = k.replace("_", " ").title()
                 print(f"  {name:<15}: {v}")
         else:
@@ -70,7 +69,6 @@ def main():
         print(f"  {'File Path':<50} | {'Language':<10} | {'Symbols':<8}")
         print("  " + "-" * 74)
         for path, lang, syms in top_files:
-            # Truncate path if too long
             short_path = path if len(path) <= 50 else f"...{path[-47:]}"
             print(f"  {short_path:<50} | {lang:<10} | {syms:<8}")
 

@@ -34,7 +34,7 @@ nix develop
 ## 🎯 Command Guide
 
 ### 1. Initialize / Re-Index
-Creates a local database at `<workspace_root>/.codegraph/codegraph.db` and indexes the project.
+Creates a local database at `<workspace_root>/.ochna/ochna.db` and indexes the project.
 ```bash
 ochna init
 ```
@@ -96,7 +96,7 @@ In large-scale codebases, `ochna` completes structural indexing and queries in m
 ### 1. Cold Start Indexing (Full parse & write)
 ```bash
 # Deletes index database and parses/indexes everything from scratch
-rm -rf .codegraph && hyperfine --runs 3 "ochna init"
+rm -rf .ochna && hyperfine --runs 3 "ochna init"
 # Result: 5.291 s ±  0.142 s
 ```
 
@@ -128,9 +128,9 @@ hyperfine --runs 10 "ochna callers new_multi_thread"
 ### Running the Python Companion Tool
 Ensure you have `uv` installed, then run:
 ```bash
-uv run main.py
+uv run python pyscripts/report.py
 ```
-This script connects to the local `.codegraph/codegraph.db` index and generates a structured codebase report:
+This script connects to the local `.ochna/ochna.db` index and generates a structured codebase report:
 *   Project baseline details (git commit SHA, branch, status, indexing timestamp).
 *   File statistics (counts, language breakdown, total sizes).
 *   Top files by symbol density.
@@ -141,8 +141,4 @@ This script connects to the local `.codegraph/codegraph.db` index and generates 
 
 ## 📜 License
 
-This project is licensed under either:
-*   Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE))
-*   MIT License ([LICENSE-MIT](LICENSE-MIT))
-
-at your option.
+This project is licensed under the Apache License, Version 2.0. See [LICENSE-APACHE](LICENSE-APACHE) for details.

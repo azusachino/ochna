@@ -71,7 +71,7 @@ Use `ochna` BEFORE resorting to standard tools like `rg` or `view_file`.
 For custom queries or advanced analytics directly from the SQLite database:
 *   **Generate Structured Report**:
     ```bash
-    uv run main.py
+    uv run python pyscripts/report.py
     ```
     *This runs under Python 3.14 and directly extracts file distributions, symbol counts, and hot call sites using `sqlite3` without invoking the binary.*
 
