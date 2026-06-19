@@ -141,4 +141,4 @@ This script connects to the local `.ochna/ochna.db` index and generates a struct
 
 ## 📜 License
 
-This project is licensed under the Apache License, Version 2.0. See [LICENSE-APACHE](LICENSE-APACHE) for details.
+This project is licensed under the Apache License, Version 2.0. See [LICENSE](LICENSE) for details.
