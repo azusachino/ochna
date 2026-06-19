@@ -91,28 +91,51 @@ cargo test
 
 ## 📊 Performance & Benchmarking
 
-For large-scale codebases, `ochna` performs structural queries in milliseconds. You can measure CLI performance using **`hyperfine`**:
+In large-scale codebases, `ochna` completes structural indexing and queries in milliseconds. Below is the baseline report evaluated on the `tokio` repository (784 files, 7,759 nodes, 5,121 edges):
 
-### Indexing Benchmark (Cold vs. Warm)
-To benchmark indexing a large repository (e.g. Netty or Kubernetes):
+### 1. Cold Start Indexing (Full parse & write)
 ```bash
-# Clean database and run cold start benchmark
+# Deletes index database and parses/indexes everything from scratch
 rm -rf .codegraph && hyperfine --runs 3 "ochna init"
-
-# Benchmarking incremental updates (warm start, checks file hashes)
-hyperfine --runs 5 "ochna init"
+# Result: 5.291 s ±  0.142 s
 ```
 
-### Query Latency Benchmark
-Compare symbol-search latency against plain-text recursive grep (`rg`):
+### 2. Warm Start Indexing (Incremental / Hash check)
 ```bash
-# ochna FTS query
-hyperfine "ochna search NioEventLoop"
-
-# Traditional recursive grep
-hyperfine "rg -w NioEventLoop"
+# Performs fast hash-based incremental checks (0 files changed)
+hyperfine --runs 5 "ochna init"
+# Result: 45.1 ms ±   2.9 ms  (117x speedup!)
 ```
-In large codebases, `ochna` will execute significantly faster as it avoids reading thousands of files off the disk repeatedly.
+
+### 3. Query Latency: Symbol Search
+```bash
+hyperfine --runs 10 "ochna search Builder"
+# Result: 2.1 ms ±   0.7 ms
+```
+
+### 4. Query Latency: Callers Trace
+```bash
+hyperfine --runs 10 "ochna callers new_multi_thread"
+# Result: 2.6 ms ±   1.6 ms
+```
+
+---
+
+## 🐍 Python Integration (uv + Python 3.14)
+
+`ochna` includes a companion Python utility configured via `uv` using Python 3.14. Since `ochna` stores its structural data in a standard, local SQLite database, you can write Python scripts to run custom analysis directly.
+
+### Running the Python Companion Tool
+Ensure you have `uv` installed, then run:
+```bash
+uv run main.py
+```
+This script connects to the local `.codegraph/codegraph.db` index and generates a structured codebase report:
+*   Project baseline details (git commit SHA, branch, status, indexing timestamp).
+*   File statistics (counts, language breakdown, total sizes).
+*   Top files by symbol density.
+*   Total symbol breakdowns by kind.
+*   Top 5 incoming call hotspots.
 
 ---
 

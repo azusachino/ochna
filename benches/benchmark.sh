@@ -13,7 +13,8 @@ fi
 echo "Building ochna in release mode..."
 cargo build --release
 
-OCHNA="./target/release/ochna"
+# Use absolute path for binary
+OCHNA="$(pwd)/target/release/ochna"
 
 # Select target project to benchmark
 TARGET_DIR="clones/tokio"
@@ -30,25 +31,25 @@ echo
 # 1. Cold Start Indexing
 echo "--- 1. Cold Start Indexing (Full parse & write) ---"
 hyperfine --prepare "rm -rf $TARGET_DIR/.codegraph" --runs 3 \
-    "$OCHNA init" --directory "$TARGET_DIR"
+    "cd $TARGET_DIR && $OCHNA init"
 echo
 
 # 2. Warm Start Indexing (Incremental update checks)
 echo "--- 2. Warm Start Indexing (Incremental / Hash check) ---"
 hyperfine --runs 5 \
-    "$OCHNA init" --directory "$TARGET_DIR"
+    "cd $TARGET_DIR && $OCHNA init"
 echo
 
 # 3. Query Benchmark: Symbol Search
 echo "--- 3. Query Latency: Symbol Search ---"
 hyperfine --runs 10 \
-    "$OCHNA search Builder" --directory "$TARGET_DIR"
+    "cd $TARGET_DIR && $OCHNA search Builder"
 echo
 
 # 4. Query Benchmark: Callers Trace
 echo "--- 4. Query Latency: Callers Trace ---"
 hyperfine --runs 10 \
-    "$OCHNA callers new_multi_thread" --directory "$TARGET_DIR"
+    "cd $TARGET_DIR && $OCHNA callers new_multi_thread"
 echo
 
 echo "Benchmarks completed."

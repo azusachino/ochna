@@ -67,6 +67,14 @@ Use `ochna` BEFORE resorting to standard tools like `rg` or `view_file`.
         ochna node --symbol <name> --include-code --line <line_number>
         ```
 
+### 4. Python Database Analysis
+For custom queries or advanced analytics directly from the SQLite database:
+*   **Generate Structured Report**:
+    ```bash
+    uv run main.py
+    ```
+    *This runs under Python 3.14 and directly extracts file distributions, symbol counts, and hot call sites using `sqlite3` without invoking the binary.*
+
 ## Workflow Integration Rules
 
 1.  **Graph First**: For any task, run `ochna explore <keyword>` first to map out the relevant implementation files.
