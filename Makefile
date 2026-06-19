@@ -1,7 +1,7 @@
 # ochna Makefile
-# Provides targets for building, testing, installing, and cleaning the project.
+# Provides industry-standard targets for building, testing, checking quality, and installing ochna.
 
-.PHONY: all build test install clean
+.PHONY: all build test fmt fmt-fix lint check install clean
 
 all: build
 
@@ -10,6 +10,17 @@ build:
 
 test:
 	cargo test
+
+fmt:
+	cargo fmt --all -- --check
+
+fmt-fix:
+	cargo fmt --all
+
+lint:
+	cargo clippy --all-targets -- -D warnings
+
+check: fmt lint
 
 install:
 	cargo install --path . --root $(HOME)/.cargo
