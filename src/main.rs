@@ -20,6 +20,8 @@ struct Cli {
 enum Commands {
     /// Initialize the code graph database and scan the project
     Init,
+    /// Sync the code graph database with incremental updates for modified files
+    Sync,
     /// Display index statistics
     Status,
     /// List indexed files with metadata
@@ -86,6 +88,13 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     match cli.command {
         Commands::Init => {
+            commands::run_init(&current_dir)?;
+        }
+        Commands::Sync => {
+            let ochna_dir = current_dir.join(".ochna");
+            if !ochna_dir.exists() {
+                return Err("Database not initialized. Please run 'ochna init' first.".into());
+            }
             commands::run_init(&current_dir)?;
         }
         Commands::Status => {

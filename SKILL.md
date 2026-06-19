@@ -15,11 +15,16 @@ Use `ochna` BEFORE resorting to standard tools like `rg` or `view_file`.
 
 ### 1. Indexing & Health
 
-- **Initialize/Update Index**:
+- **Initialize Index**:
   ```bash
   ochna init
   ```
-  _Call this at the start of a session or after editing files to sync the SQLite index._
+  _Call this at the start of a project/session to create the SQLite index._
+- **Update/Sync Index**:
+  ```bash
+  ochna sync
+  ```
+  _Call this after editing files to incrementally sync code changes into the SQLite index._
 - **Check Index Statistics**:
   ```bash
   ochna status
