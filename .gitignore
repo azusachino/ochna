@@ -1,16 +1,10 @@
-# Binaries for programs and plugins
-*.exe
-*.exe~
-*.dll
-*.so
-*.dylib
+# Rust
+/target
+/Cargo.lock
 
-# Test binary, built with `go test -c`
-*.test
+# ochna
+/.ochna
 
-# Output of the go coverage tool, specifically when used with LiteIDE
-*.out
-
-# Dependency directories (remove the comment below to include it)
-vendor/
+# IDEs and OS
 .idea/
+.DS_Store

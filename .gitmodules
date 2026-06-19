@@ -1,0 +1,9 @@
+[submodule "clones/tokio"]
+	path = clones/tokio
+	url = https://github.com/tokio-rs/tokio.git
+[submodule "clones/netty"]
+	path = clones/netty
+	url = https://github.com/netty/netty.git
+[submodule "clones/kubernetes"]
+	path = clones/kubernetes
+	url = https://github.com/kubernetes/kubernetes.git
