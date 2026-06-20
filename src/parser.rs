@@ -15,7 +15,7 @@ fn raw_call(caller_id: &str, callee_name: String, call_node: tree_sitter::Node) 
     }
 }
 
-/// Parse Rust, Go, or Java source and extract nodes (symbols) plus the raw,
+/// Parse supported source and extract nodes (symbols) plus the raw,
 /// unresolved call sites within them. Call sites are returned unresolved so the
 /// caller can resolve them against the whole-project symbol index (see
 /// [`resolve_calls_global`]) rather than only the symbols in this one file.
@@ -27,14 +27,14 @@ pub fn parse_code(
     let mut parser = Parser::new();
     let lang = language.to_lowercase();
 
-    if lang == "rust" || lang == "rs" {
-        parser.set_language(&tree_sitter_rust::language())?;
-    } else if lang == "go" {
-        parser.set_language(&tree_sitter_go::language())?;
-    } else if lang == "java" {
-        parser.set_language(&tree_sitter_java::language())?;
-    } else {
-        return Err(format!("Unsupported language: {}", language).into());
+    match lang.as_str() {
+        "rust" | "rs" => parser.set_language(&tree_sitter_rust::LANGUAGE.into())?,
+        "go" => parser.set_language(&tree_sitter_go::LANGUAGE.into())?,
+        "java" => parser.set_language(&tree_sitter_java::LANGUAGE.into())?,
+        "c" => parser.set_language(&tree_sitter_c::LANGUAGE.into())?,
+        "cpp" | "c++" | "cc" | "cxx" => parser.set_language(&tree_sitter_cpp::LANGUAGE.into())?,
+        "zig" => parser.set_language(&tree_sitter_zig::LANGUAGE.into())?,
+        _ => return Err(format!("Unsupported language: {}", language).into()),
     }
 
     let tree = parser
@@ -65,6 +65,29 @@ pub fn parse_code(
         );
     } else if lang == "java" {
         traverse_java(
+            tree.root_node(),
+            content,
+            file_path,
+            &mut nodes,
+            &mut raw_calls,
+            None,
+            None,
+        );
+    } else if lang == "c" || lang == "cpp" || lang == "c++" || lang == "cc" || lang == "cxx" {
+        traverse_c_like(
+            tree.root_node(),
+            content,
+            file_path,
+            &mut nodes,
+            &mut raw_calls,
+            CLikeContext {
+                parent_qualified_name: None,
+                parent_is_type: false,
+            },
+            None,
+        );
+    } else if lang == "zig" {
+        traverse_zig(
             tree.root_node(),
             content,
             file_path,
@@ -636,6 +659,7 @@ fn get_signature(node: tree_sitter::Node, content: &str) -> String {
             || kind == "declaration_list"
             || kind == "interface_type"
             || kind == "struct_type"
+            || kind == "compound_statement"
             || kind == "class_body"
             || kind == "interface_body"
             || kind == "constructor_body"
@@ -701,6 +725,363 @@ fn get_doc_comment(node: tree_sitter::Node, content: &str) -> Option<String> {
             .collect::<Vec<_>>()
             .join("\n");
         Some(cleaned)
+    }
+}
+
+fn text_for_node(node: tree_sitter::Node, content: &str) -> String {
+    node.utf8_text(content.as_bytes())
+        .unwrap_or("")
+        .trim()
+        .to_string()
+}
+
+fn last_descendant_by_kind<'a>(
+    node: tree_sitter::Node<'a>,
+    kinds: &[&str],
+) -> Option<tree_sitter::Node<'a>> {
+    let mut found = if kinds.contains(&node.kind()) {
+        Some(node)
+    } else {
+        None
+    };
+
+    for i in 0..node.child_count() {
+        if let Some(child) = node.child(i) {
+            if let Some(candidate) = last_descendant_by_kind(child, kinds) {
+                found = Some(candidate);
+            }
+        }
+    }
+
+    found
+}
+
+fn normalize_qualified_name(name: &str) -> String {
+    name.split_whitespace().collect::<String>()
+}
+
+fn push_symbol(
+    nodes: &mut Vec<Node>,
+    file_path: &str,
+    name: String,
+    kind: &str,
+    qualified_name: String,
+    node: tree_sitter::Node,
+    content: &str,
+) {
+    let start_point = node.start_position();
+    let end_point = node.end_position();
+    nodes.push(Node {
+        id: format!("{}::{}", file_path, qualified_name),
+        name,
+        kind: kind.to_string(),
+        qualified_name: Some(qualified_name),
+        file_path: file_path.to_string(),
+        start_line: (start_point.row + 1) as i64,
+        end_line: (end_point.row + 1) as i64,
+        start_column: start_point.column as i64,
+        end_column: end_point.column as i64,
+        signature: Some(get_signature(node, content)),
+        doc_comment: get_doc_comment(node, content),
+    });
+}
+
+fn qualified_name(parent: Option<&str>, name: &str) -> String {
+    if let Some(parent) = parent {
+        format!("{}::{}", parent, name)
+    } else {
+        name.to_string()
+    }
+}
+
+fn extract_c_declarator_name(node: tree_sitter::Node, content: &str) -> Option<String> {
+    if let Some(declarator) = node.child_by_field_name("declarator") {
+        return extract_c_declarator_name(declarator, content);
+    }
+
+    match node.kind() {
+        "identifier"
+        | "field_identifier"
+        | "type_identifier"
+        | "qualified_identifier"
+        | "destructor_name" => Some(normalize_qualified_name(&text_for_node(node, content))),
+        _ => last_descendant_by_kind(
+            node,
+            &[
+                "qualified_identifier",
+                "field_identifier",
+                "type_identifier",
+                "identifier",
+                "destructor_name",
+            ],
+        )
+        .map(|name_node| normalize_qualified_name(&text_for_node(name_node, content))),
+    }
+}
+
+fn extract_c_call_target(node: tree_sitter::Node, content: &str) -> String {
+    match node.kind() {
+        "identifier" | "field_identifier" | "type_identifier" | "qualified_identifier" => {
+            normalize_qualified_name(&text_for_node(node, content))
+        }
+        "field_expression" => node
+            .child_by_field_name("field")
+            .map(|field| text_for_node(field, content))
+            .unwrap_or_else(|| {
+                text_for_node(node, content)
+                    .split('.')
+                    .next_back()
+                    .unwrap_or("")
+                    .to_string()
+            }),
+        _ => extract_c_declarator_name(node, content)
+            .unwrap_or_else(|| normalize_qualified_name(&text_for_node(node, content))),
+    }
+}
+
+#[derive(Clone, Copy)]
+struct CLikeContext<'a> {
+    parent_qualified_name: Option<&'a str>,
+    parent_is_type: bool,
+}
+
+fn traverse_c_like<'a>(
+    node: tree_sitter::Node<'a>,
+    content: &'a str,
+    file_path: &str,
+    nodes: &mut Vec<Node>,
+    calls: &mut Vec<RawCall>,
+    context: CLikeContext<'a>,
+    current_caller_id: Option<&str>,
+) {
+    let mut next_context = context;
+    let mut next_caller_id = current_caller_id;
+
+    #[allow(unused_assignments)]
+    let mut qname_holder = String::new();
+    #[allow(unused_assignments)]
+    let mut id_holder = String::new();
+
+    match node.kind() {
+        "namespace_definition" => {
+            if let Some(name_node) = node.child_by_field_name("name") {
+                let name = normalize_qualified_name(&text_for_node(name_node, content));
+                if !name.is_empty() {
+                    let qname = qualified_name(context.parent_qualified_name, &name);
+                    push_symbol(
+                        nodes,
+                        file_path,
+                        name,
+                        "namespace",
+                        qname.clone(),
+                        node,
+                        content,
+                    );
+                    qname_holder = qname;
+                    next_context = CLikeContext {
+                        parent_qualified_name: Some(&qname_holder),
+                        parent_is_type: false,
+                    };
+                    next_caller_id = None;
+                }
+            }
+        }
+        "class_specifier" | "struct_specifier" => {
+            let name_node = node
+                .child_by_field_name("name")
+                .or_else(|| find_child_by_kind(node, "type_identifier"))
+                .or_else(|| find_child_by_kind(node, "identifier"));
+            if let Some(name_node) = name_node {
+                let name = normalize_qualified_name(&text_for_node(name_node, content));
+                if !name.is_empty() {
+                    let qname = qualified_name(context.parent_qualified_name, &name);
+                    let kind = if node.kind() == "class_specifier" {
+                        "class"
+                    } else {
+                        "struct"
+                    };
+                    push_symbol(nodes, file_path, name, kind, qname.clone(), node, content);
+                    qname_holder = qname;
+                    next_context = CLikeContext {
+                        parent_qualified_name: Some(&qname_holder),
+                        parent_is_type: true,
+                    };
+                    next_caller_id = None;
+                }
+            }
+        }
+        "function_definition" => {
+            if let Some(declarator) = node.child_by_field_name("declarator") {
+                if let Some(raw_name) = extract_c_declarator_name(declarator, content) {
+                    if !raw_name.is_empty() {
+                        let simple_name = raw_name
+                            .rsplit("::")
+                            .next()
+                            .unwrap_or(&raw_name)
+                            .trim_start_matches('~')
+                            .to_string();
+                        let qname = if raw_name.contains("::") {
+                            raw_name.clone()
+                        } else {
+                            qualified_name(context.parent_qualified_name, &simple_name)
+                        };
+                        let kind = if context.parent_is_type || raw_name.contains("::") {
+                            "method"
+                        } else {
+                            "function"
+                        };
+                        push_symbol(
+                            nodes,
+                            file_path,
+                            simple_name,
+                            kind,
+                            qname.clone(),
+                            node,
+                            content,
+                        );
+                        id_holder = format!("{}::{}", file_path, qname);
+                        next_caller_id = Some(&id_holder);
+                    }
+                }
+            }
+        }
+        "call_expression" => {
+            if let Some(caller) = current_caller_id {
+                if let Some(func_node) = node.child_by_field_name("function") {
+                    calls.push(raw_call(
+                        caller,
+                        extract_c_call_target(func_node, content),
+                        node,
+                    ));
+                }
+            }
+        }
+        _ => {}
+    }
+
+    for i in 0..node.child_count() {
+        if let Some(child) = node.child(i) {
+            traverse_c_like(
+                child,
+                content,
+                file_path,
+                nodes,
+                calls,
+                next_context,
+                next_caller_id,
+            );
+        }
+    }
+}
+
+fn zig_variable_name(node: tree_sitter::Node, content: &str) -> Option<String> {
+    find_child_by_kind(node, "identifier").map(|name_node| text_for_node(name_node, content))
+}
+
+fn zig_variable_kind(node: tree_sitter::Node, content: &str) -> Option<&'static str> {
+    let text = text_for_node(node, content);
+    if text.contains("struct") {
+        Some("struct")
+    } else if text.contains("enum") {
+        Some("enum")
+    } else if text.contains("union") {
+        Some("union")
+    } else {
+        None
+    }
+}
+
+fn extract_zig_call_target(node: tree_sitter::Node, content: &str) -> String {
+    match node.kind() {
+        "identifier" => text_for_node(node, content),
+        "field_expression" => node
+            .child_by_field_name("field")
+            .map(|field| text_for_node(field, content))
+            .unwrap_or_else(|| {
+                text_for_node(node, content)
+                    .split('.')
+                    .next_back()
+                    .unwrap_or("")
+                    .to_string()
+            }),
+        _ => last_descendant_by_kind(node, &["identifier"])
+            .map(|name_node| text_for_node(name_node, content))
+            .unwrap_or_else(|| text_for_node(node, content)),
+    }
+}
+
+fn traverse_zig<'a>(
+    node: tree_sitter::Node<'a>,
+    content: &'a str,
+    file_path: &str,
+    nodes: &mut Vec<Node>,
+    calls: &mut Vec<RawCall>,
+    current_parent_qualified_name: Option<&str>,
+    current_caller_id: Option<&str>,
+) {
+    let mut next_parent_qualified_name = current_parent_qualified_name;
+    let mut next_caller_id = current_caller_id;
+
+    #[allow(unused_assignments)]
+    let mut qname_holder = String::new();
+    #[allow(unused_assignments)]
+    let mut id_holder = String::new();
+
+    match node.kind() {
+        "variable_declaration" => {
+            if let (Some(name), Some(kind)) = (
+                zig_variable_name(node, content),
+                zig_variable_kind(node, content),
+            ) {
+                let qname = qualified_name(current_parent_qualified_name, &name);
+                push_symbol(nodes, file_path, name, kind, qname.clone(), node, content);
+                qname_holder = qname;
+                next_parent_qualified_name = Some(&qname_holder);
+                next_caller_id = None;
+            }
+        }
+        "function_declaration" => {
+            if let Some(name_node) = node.child_by_field_name("name") {
+                let name = text_for_node(name_node, content);
+                if !name.is_empty() {
+                    let qname = qualified_name(current_parent_qualified_name, &name);
+                    let kind = if current_parent_qualified_name.is_some() {
+                        "method"
+                    } else {
+                        "function"
+                    };
+                    push_symbol(nodes, file_path, name, kind, qname.clone(), node, content);
+                    id_holder = format!("{}::{}", file_path, qname);
+                    next_caller_id = Some(&id_holder);
+                }
+            }
+        }
+        "call_expression" => {
+            if let Some(caller) = current_caller_id {
+                if let Some(func_node) = node.child_by_field_name("function") {
+                    calls.push(raw_call(
+                        caller,
+                        extract_zig_call_target(func_node, content),
+                        node,
+                    ));
+                }
+            }
+        }
+        _ => {}
+    }
+
+    for i in 0..node.child_count() {
+        if let Some(child) = node.child(i) {
+            traverse_zig(
+                child,
+                content,
+                file_path,
+                nodes,
+                calls,
+                next_parent_qualified_name,
+                next_caller_id,
+            );
+        }
     }
 }
 
@@ -1209,5 +1590,207 @@ public class App {
             .find(|e| e.source_id == main_method.id && e.target_id == run_method.id)
             .unwrap();
         assert_eq!(edge_main_run.kind, "calls");
+    }
+
+    #[test]
+    fn test_parse_c_code() {
+        let c_code = r#"
+// Point struct.
+struct Point {
+    int x;
+    int y;
+};
+
+// Helper function.
+int helper(int value) {
+    return value + 1;
+}
+
+// Main entry point.
+int main(void) {
+    return helper(41);
+}
+"#;
+
+        let (nodes, calls) = parse_code("src/main.c", c_code, "c").unwrap();
+        let edges = resolve_calls_local(&nodes, &calls);
+
+        let struct_node = nodes
+            .iter()
+            .find(|n| n.name == "Point" && n.kind == "struct")
+            .unwrap();
+        assert_eq!(struct_node.id, "src/main.c::Point");
+        assert_eq!(struct_node.doc_comment.as_deref(), Some("// Point struct."));
+
+        let helper = nodes
+            .iter()
+            .find(|n| n.name == "helper" && n.kind == "function")
+            .unwrap();
+        assert_eq!(helper.id, "src/main.c::helper");
+        assert_eq!(helper.doc_comment.as_deref(), Some("// Helper function."));
+
+        let main = nodes
+            .iter()
+            .find(|n| n.name == "main" && n.kind == "function")
+            .unwrap();
+        assert_eq!(main.id, "src/main.c::main");
+
+        let edge_main_helper = edges
+            .iter()
+            .find(|e| e.source_id == main.id && e.target_id == helper.id)
+            .unwrap();
+        assert_eq!(edge_main_helper.kind, "calls");
+    }
+
+    #[test]
+    fn test_parse_cpp_code() {
+        let cpp_code = r#"
+namespace demo {
+// Point class.
+class Point {
+public:
+    int sum() {
+        return helper();
+    }
+
+    int helper() {
+        return 42;
+    }
+};
+
+int run() {
+    Point point;
+    return point.sum();
+}
+}
+"#;
+
+        let (nodes, calls) = parse_code("src/point.cpp", cpp_code, "cpp").unwrap();
+        let edges = resolve_calls_local(&nodes, &calls);
+
+        let namespace = nodes
+            .iter()
+            .find(|n| n.name == "demo" && n.kind == "namespace")
+            .unwrap();
+        assert_eq!(namespace.id, "src/point.cpp::demo");
+
+        let class_node = nodes
+            .iter()
+            .find(|n| n.name == "Point" && n.kind == "class")
+            .unwrap();
+        assert_eq!(class_node.id, "src/point.cpp::demo::Point");
+        assert_eq!(class_node.doc_comment.as_deref(), Some("// Point class."));
+
+        let sum_method = nodes
+            .iter()
+            .find(|n| n.name == "sum" && n.kind == "method")
+            .unwrap();
+        assert_eq!(sum_method.id, "src/point.cpp::demo::Point::sum");
+
+        let helper_method = nodes
+            .iter()
+            .find(|n| n.name == "helper" && n.kind == "method")
+            .unwrap();
+        assert_eq!(helper_method.id, "src/point.cpp::demo::Point::helper");
+
+        let run = nodes
+            .iter()
+            .find(|n| n.name == "run" && n.kind == "function")
+            .unwrap();
+        assert_eq!(run.id, "src/point.cpp::demo::run");
+
+        let edge_sum_helper = edges
+            .iter()
+            .find(|e| e.source_id == sum_method.id && e.target_id == helper_method.id)
+            .unwrap();
+        assert_eq!(edge_sum_helper.kind, "calls");
+
+        let edge_run_sum = edges
+            .iter()
+            .find(|e| e.source_id == run.id && e.target_id == sum_method.id)
+            .unwrap();
+        assert_eq!(edge_run_sum.kind, "calls");
+    }
+
+    #[test]
+    fn test_parse_zig_code() {
+        let zig_code = r#"
+/// Point type.
+const Point = struct {
+    x: i32,
+    y: i32,
+
+    /// Sum fields.
+    fn sum(self: Point) i32 {
+        return self.helper();
+    }
+
+    fn helper(self: Point) i32 {
+        return self.x + self.y;
+    }
+};
+
+fn makePoint() Point {
+    return Point{ .x = 1, .y = 2 };
+}
+
+pub fn main() void {
+    const point = makePoint();
+    _ = point.sum();
+}
+"#;
+
+        let (nodes, calls) = parse_code("src/main.zig", zig_code, "zig").unwrap();
+        let edges = resolve_calls_local(&nodes, &calls);
+
+        let struct_node = nodes
+            .iter()
+            .find(|n| n.name == "Point" && n.kind == "struct")
+            .unwrap();
+        assert_eq!(struct_node.id, "src/main.zig::Point");
+        assert_eq!(struct_node.doc_comment.as_deref(), Some("/// Point type."));
+
+        let sum_method = nodes
+            .iter()
+            .find(|n| n.name == "sum" && n.kind == "method")
+            .unwrap();
+        assert_eq!(sum_method.id, "src/main.zig::Point::sum");
+        assert_eq!(sum_method.doc_comment.as_deref(), Some("/// Sum fields."));
+
+        let helper_method = nodes
+            .iter()
+            .find(|n| n.name == "helper" && n.kind == "method")
+            .unwrap();
+        assert_eq!(helper_method.id, "src/main.zig::Point::helper");
+
+        let make_point = nodes
+            .iter()
+            .find(|n| n.name == "makePoint" && n.kind == "function")
+            .unwrap();
+        assert_eq!(make_point.id, "src/main.zig::makePoint");
+
+        let main = nodes
+            .iter()
+            .find(|n| n.name == "main" && n.kind == "function")
+            .unwrap();
+        assert_eq!(main.id, "src/main.zig::main");
+
+        let edge_sum_helper = edges
+            .iter()
+            .find(|e| e.source_id == sum_method.id && e.target_id == helper_method.id)
+            .unwrap();
+        assert_eq!(edge_sum_helper.kind, "calls");
+
+        let edge_main_make_point = edges
+            .iter()
+            .find(|e| e.source_id == main.id && e.target_id == make_point.id)
+            .unwrap();
+        assert_eq!(edge_main_make_point.kind, "calls");
+
+        let edge_main_sum = edges
+            .iter()
+            .find(|e| e.source_id == main.id && e.target_id == sum_method.id)
+            .unwrap();
+        assert_eq!(edge_main_sum.kind, "calls");
     }
 }

@@ -9,7 +9,7 @@ use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use tracing::{debug, error, info, warn};
 
-/// Recursively scans `current_dir` for `.rs`, `.go`, and `.java` files.
+/// Recursively scans `current_dir` for supported source files.
 /// Relative paths are calculated with respect to `base_dir`.
 fn scan_dir(base_dir: &Path, current_dir: &Path, files: &mut Vec<PathBuf>) -> std::io::Result<()> {
     if current_dir.is_dir() {
@@ -27,18 +27,27 @@ fn scan_dir(base_dir: &Path, current_dir: &Path, files: &mut Vec<PathBuf>) -> st
                     continue;
                 }
                 scan_dir(base_dir, &path, files)?;
-            } else if path.is_file() {
-                if let Some(ext) = path.extension() {
-                    if ext == "rs" || ext == "go" || ext == "java" {
-                        if let Ok(rel_path) = path.strip_prefix(base_dir) {
-                            files.push(rel_path.to_path_buf());
-                        }
-                    }
+            } else if path.is_file() && language_for_path(&path).is_some() {
+                if let Ok(rel_path) = path.strip_prefix(base_dir) {
+                    files.push(rel_path.to_path_buf());
                 }
             }
         }
     }
     Ok(())
+}
+
+fn language_for_path(path: &Path) -> Option<&'static str> {
+    let ext = path.extension()?.to_string_lossy().to_lowercase();
+    match ext.as_str() {
+        "rs" => Some("rust"),
+        "go" => Some("go"),
+        "java" => Some("java"),
+        "c" | "h" => Some("c"),
+        "cc" | "cpp" | "cxx" | "hh" | "hpp" | "hxx" => Some("cpp"),
+        "zig" => Some("zig"),
+        _ => None,
+    }
 }
 
 /// Calculate a simple hash of the file contents.
@@ -118,7 +127,7 @@ fn get_git_info(
 /// - Creates a `.ochna/` directory in the workspace.
 /// - Opens/creates the SQLite database at `.ochna/ochna.db`.
 /// - Initializes the schema.
-/// - Recursively scans for `.rs`, `.go`, and `.java` files.
+/// - Recursively scans for supported source files.
 /// - Computes hashes, and updates database for new/modified files.
 /// - Resolves call edges across files and records unmatched calls as unresolved refs.
 pub fn run_init(workspace: &Path) -> Result<(), Box<dyn Error>> {
@@ -189,12 +198,8 @@ pub fn run_init(workspace: &Path) -> Result<(), Box<dyn Error>> {
             debug!("Indexing: {}", relative_path_str);
             db::delete_file_data(&tx, &relative_path_str)?;
 
-            let language = if relative_path_str.ends_with(".rs") {
-                "rust"
-            } else if relative_path_str.ends_with(".go") {
-                "go"
-            } else if relative_path_str.ends_with(".java") {
-                "java"
+            let language = if let Some(language) = language_for_path(&absolute_path) {
+                language
             } else {
                 continue;
             };
@@ -1005,6 +1010,30 @@ mod tests {
         "#;
         fs::write(&go_file, go_code).unwrap();
 
+        let c_file = temp_workspace.join("main.c");
+        let c_code = r#"
+            int c_helper(void) {
+                return 1;
+            }
+        "#;
+        fs::write(&c_file, c_code).unwrap();
+
+        let cpp_file = temp_workspace.join("main.cpp");
+        let cpp_code = r#"
+            int cpp_helper() {
+                return 2;
+            }
+        "#;
+        fs::write(&cpp_file, cpp_code).unwrap();
+
+        let zig_file = temp_workspace.join("main.zig");
+        let zig_code = r#"
+            fn zigHelper() i32 {
+                return 3;
+            }
+        "#;
+        fs::write(&zig_file, zig_code).unwrap();
+
         // Let's create an ignored directory/file to ensure they are skipped
         let ignored_dir = temp_workspace.join(".git");
         fs::create_dir_all(&ignored_dir).unwrap();
@@ -1030,13 +1059,16 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM nodes", [], |row| row.get(0))
             .unwrap();
 
-        // files should only contain "src/main.rs" and "main.go" (total 2 files)
-        assert_eq!(files_count, 2);
+        // files should only contain supported source files outside ignored directories.
+        assert_eq!(files_count, 5);
         // nodes:
         // rust: "main" (function), "helper" (function) -> 2 nodes
         // go: "GoHelper" (function) -> 1 node
-        // Total nodes: 3
-        assert_eq!(nodes_count, 3);
+        // c: "c_helper" (function) -> 1 node
+        // cpp: "cpp_helper" (function) -> 1 node
+        // zig: "zigHelper" (function) -> 1 node
+        // Total nodes: 6
+        assert_eq!(nodes_count, 6);
 
         // Run status command and verify it succeeds (text + json)
         run_status(&temp_workspace, false).unwrap();
@@ -1137,8 +1169,8 @@ mod tests {
         let nodes_count_after: i64 = conn
             .query_row("SELECT COUNT(*) FROM nodes", [], |row| row.get(0))
             .unwrap();
-        // Now rust file has 1 node ("main"). Go file has 1 node ("GoHelper"). Total: 2 nodes.
-        assert_eq!(nodes_count_after, 2);
+        // Now rust file has 1 node ("main"). Other source files retain one node each.
+        assert_eq!(nodes_count_after, 5);
 
         // Clean up temporary workspace
         fs::remove_dir_all(&temp_workspace).unwrap();

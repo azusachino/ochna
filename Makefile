@@ -33,6 +33,8 @@ setup:
 	cd clones/tokio && ../../target/release/ochna init || true
 	cd clones/netty && ../../target/release/ochna init || true
 	cd clones/kubernetes && ../../target/release/ochna init || true
+	cd clones/linux && ../../target/release/ochna init || true
+	cd clones/zig && ../../target/release/ochna init || true
 
 install:
 	cargo install --path . --root $(HOME)/.cargo
