@@ -1,7 +1,7 @@
 # ochna Makefile
 # Provides industry-standard targets for building, testing, checking quality, and installing ochna.
 
-.PHONY: all build test fmt fmt-fix lint check setup install clean
+.PHONY: all build test fmt fmt-fix lint check setup install report clean
 
 all: build
 
@@ -29,15 +29,16 @@ setup:
 	uv venv --python 3.14
 	@echo "Building ochna binary..."
 	cargo build --release
-	@echo "Indexing development submodules..."
-	cd clones/tokio && ../../target/release/ochna init || true
-	cd clones/netty && ../../target/release/ochna init || true
-	cd clones/kubernetes && ../../target/release/ochna init || true
-	cd clones/linux && ../../target/release/ochna init || true
-	cd clones/zig && ../../target/release/ochna init || true
+	@echo "Done. Run 'make report' to index the test giants and emit BENCHMARK.md."
 
 install:
 	cargo install --path . --root $(HOME)/.cargo
+
+# Index every checked-out test giant and write BENCHMARK.md. Reproducible
+# quality gate: counts are stable per pinned submodule commit, so a parser
+# regression shows up as a count delta. Use REINDEX=1 to force a clean re-index.
+report: build
+	./scripts/report.sh
 
 clean:
 	cargo clean
