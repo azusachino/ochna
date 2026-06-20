@@ -1,6 +1,6 @@
 # ochna 🌳
 
-`ochna` is a local codebase intelligence CLI. It recursively parses **Java**, **Rust**, and **Go** source files using Tree-sitter ASTs, indexes symbols and call edges into a local SQLite database, and provides high-performance search and dependency-graph queries with minimal overhead.
+`ochna` is a local codebase intelligence CLI. It recursively parses **Rust**, **Go**, **Java**, **C**, **C++**, and **Zig** source files using Tree-sitter ASTs, indexes symbols and call edges into a local SQLite database, and provides high-performance search and dependency-graph queries with minimal overhead.
 
 ---
 

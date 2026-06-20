@@ -22,4 +22,5 @@ A structural code-graph CLI: parses Rust/Go/Java with Tree-sitter, indexes symbo
 
 ## Test giants
 
-`clones/tokio` (Rust), `clones/netty` (Java), `clones/kubernetes` (Go) are git submodules used as real-world index targets and benchmark baselines.
+`clones/tokio` (Rust), `clones/netty` (Java), `clones/kubernetes` (Go), `clones/linux` (C), and `clones/zig` (Zig/C/C++) are git submodules used as real-world index targets and benchmark baselines.
+They intentionally stay as submodules; `.gitmodules` uses `ignore = dirty` so generated/untracked files inside the clones do not pollute parent `git status`, while recorded submodule commit changes still show up.
