@@ -165,6 +165,9 @@ pub fn run_init(workspace: &Path) -> Result<(), Box<dyn Error>> {
     db::init_schema(&conn)?;
 
     let tx = conn.transaction()?;
+    if is_fresh_build {
+        db::drop_node_fts_triggers(&tx)?;
+    }
 
     let mut files = Vec::new();
     scan_dir(workspace, workspace, &mut files)?;
@@ -366,6 +369,11 @@ pub fn run_init(workspace: &Path) -> Result<(), Box<dyn Error>> {
         .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
         .unwrap_or_else(|| "Unknown".to_string());
     db::upsert_project_metadata(&tx, "indexed_at", Some(&indexed_at))?;
+
+    if is_fresh_build {
+        db::rebuild_node_fts(&tx)?;
+        db::create_node_fts_triggers(&tx)?;
+    }
 
     tx.commit()?;
 
@@ -1299,6 +1307,28 @@ mod tests {
             )
             .unwrap();
         assert_eq!(unresolved, 1, "expected one unresolved reference");
+
+        fs::remove_dir_all(&temp_workspace).unwrap();
+    }
+
+    #[test]
+    fn test_fresh_init_rebuilds_fts_index() {
+        let temp_workspace = create_temp_dir();
+        let src_dir = temp_workspace.join("src");
+        fs::create_dir_all(&src_dir).unwrap();
+        fs::write(
+            src_dir.join("main.rs"),
+            "/// Performs a searchable calibration.\nfn calibrate() {}\n",
+        )
+        .unwrap();
+
+        run_init(&temp_workspace).unwrap();
+
+        let db_path = temp_workspace.join(".ochna").join("ochna.db");
+        let conn = Connection::open(&db_path).unwrap();
+        let fts_results = db::search_nodes_fts(&conn, "calibration").unwrap();
+        assert_eq!(fts_results.len(), 1);
+        assert_eq!(fts_results[0].name, "calibrate");
 
         fs::remove_dir_all(&temp_workspace).unwrap();
     }

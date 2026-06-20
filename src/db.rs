@@ -162,32 +162,7 @@ pub fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
         [],
     )?;
 
-    // Triggers to keep nodes_fts in sync with nodes
-    conn.execute(
-        "CREATE TRIGGER IF NOT EXISTS nodes_ai AFTER INSERT ON nodes BEGIN
-            INSERT INTO nodes_fts(rowid, name, qualified_name, signature, doc_comment)
-            VALUES (new.rowid, new.name, new.qualified_name, new.signature, new.doc_comment);
-         END;",
-        [],
-    )?;
-
-    conn.execute(
-        "CREATE TRIGGER IF NOT EXISTS nodes_ad AFTER DELETE ON nodes BEGIN
-            INSERT INTO nodes_fts(nodes_fts, rowid, name, qualified_name, signature, doc_comment)
-            VALUES ('delete', old.rowid, old.name, old.qualified_name, old.signature, old.doc_comment);
-         END;",
-        [],
-    )?;
-
-    conn.execute(
-        "CREATE TRIGGER IF NOT EXISTS nodes_au AFTER UPDATE ON nodes BEGIN
-            INSERT INTO nodes_fts(nodes_fts, rowid, name, qualified_name, signature, doc_comment)
-            VALUES ('delete', old.rowid, old.name, old.qualified_name, old.signature, old.doc_comment);
-            INSERT INTO nodes_fts(rowid, name, qualified_name, signature, doc_comment)
-            VALUES (new.rowid, new.name, new.qualified_name, new.signature, new.doc_comment);
-         END;",
-        [],
-    )?;
+    create_node_fts_triggers(conn)?;
 
     // Indexes for query performance optimization
     conn.execute(
@@ -217,6 +192,51 @@ pub fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
         [],
     )?;
 
+    Ok(())
+}
+
+/// Create triggers that keep the external-content FTS table synchronized with nodes.
+pub fn create_node_fts_triggers(conn: &Connection) -> rusqlite::Result<()> {
+    conn.execute(
+        "CREATE TRIGGER IF NOT EXISTS nodes_ai AFTER INSERT ON nodes BEGIN
+            INSERT INTO nodes_fts(rowid, name, qualified_name, signature, doc_comment)
+            VALUES (new.rowid, new.name, new.qualified_name, new.signature, new.doc_comment);
+         END;",
+        [],
+    )?;
+
+    conn.execute(
+        "CREATE TRIGGER IF NOT EXISTS nodes_ad AFTER DELETE ON nodes BEGIN
+            INSERT INTO nodes_fts(nodes_fts, rowid, name, qualified_name, signature, doc_comment)
+            VALUES ('delete', old.rowid, old.name, old.qualified_name, old.signature, old.doc_comment);
+         END;",
+        [],
+    )?;
+
+    conn.execute(
+        "CREATE TRIGGER IF NOT EXISTS nodes_au AFTER UPDATE ON nodes BEGIN
+            INSERT INTO nodes_fts(nodes_fts, rowid, name, qualified_name, signature, doc_comment)
+            VALUES ('delete', old.rowid, old.name, old.qualified_name, old.signature, old.doc_comment);
+            INSERT INTO nodes_fts(rowid, name, qualified_name, signature, doc_comment)
+            VALUES (new.rowid, new.name, new.qualified_name, new.signature, new.doc_comment);
+         END;",
+        [],
+    )?;
+
+    Ok(())
+}
+
+/// Drop node FTS maintenance triggers so fresh builds can bulk-load nodes cheaply.
+pub fn drop_node_fts_triggers(conn: &Connection) -> rusqlite::Result<()> {
+    conn.execute("DROP TRIGGER IF EXISTS nodes_ai", [])?;
+    conn.execute("DROP TRIGGER IF EXISTS nodes_ad", [])?;
+    conn.execute("DROP TRIGGER IF EXISTS nodes_au", [])?;
+    Ok(())
+}
+
+/// Rebuild the external-content FTS index from the current nodes table.
+pub fn rebuild_node_fts(conn: &Connection) -> rusqlite::Result<()> {
+    conn.execute("INSERT INTO nodes_fts(nodes_fts) VALUES('rebuild')", [])?;
     Ok(())
 }
 
