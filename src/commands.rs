@@ -2,7 +2,7 @@ use crate::db;
 use crate::parser;
 use rayon::prelude::*;
 use rusqlite::Connection;
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 use serde_json::json;
 use std::collections::hash_map::DefaultHasher;
 use std::error::Error;
@@ -165,18 +165,31 @@ pub fn run_init(workspace: &Path) -> Result<(), Box<dyn Error>> {
     db::init_schema(&conn)?;
 
     let tx = conn.transaction()?;
+    if is_fresh_build {
+        db::drop_node_fts_triggers(&tx)?;
+    }
 
     let mut files = Vec::new();
     scan_dir(workspace, workspace, &mut files)?;
 
+    let mut affected_source_ids: FxHashSet<String> = FxHashSet::default();
+    let mut changed_symbol_names: FxHashSet<String> = FxHashSet::default();
+
     // Prune files that are no longer on disk
     {
+        let disk_files: FxHashSet<String> = files
+            .iter()
+            .map(|path| path.to_string_lossy().into_owned())
+            .collect();
         let mut stmt = tx.prepare("SELECT file_path FROM files")?;
         let db_files: Result<Vec<String>, _> = stmt.query_map([], |row| row.get(0))?.collect();
         let db_files = db_files?;
         for db_file in db_files {
-            let exists = files.iter().any(|f| f.to_string_lossy() == db_file);
-            if !exists {
+            if !disk_files.contains(&db_file) {
+                for (id, name) in db::get_node_ids_and_names_for_file(&tx, &db_file)? {
+                    affected_source_ids.insert(id);
+                    changed_symbol_names.insert(name);
+                }
                 info!("Pruning deleted file from index: {}", db_file);
                 db::delete_file_data(&tx, &db_file)?;
             }
@@ -270,6 +283,17 @@ pub fn run_init(workspace: &Path) -> Result<(), Box<dyn Error>> {
             .collect()
     });
 
+    for pf in &parsed {
+        for (id, name) in db::get_node_ids_and_names_for_file(&tx, &pf.relative_path)? {
+            affected_source_ids.insert(id);
+            changed_symbol_names.insert(name);
+        }
+        for node in &pf.nodes {
+            affected_source_ids.insert(node.id.clone());
+            changed_symbol_names.insert(node.name.clone());
+        }
+    }
+
     // Write parsed results into the single transaction serially.
     for pf in &parsed {
         debug!("Indexing: {}", pf.relative_path);
@@ -292,35 +316,64 @@ pub fn run_init(workspace: &Path) -> Result<(), Box<dyn Error>> {
         )?;
     }
 
-    // Clear old resolved edges and unresolved references
-    tx.execute("DELETE FROM edges", [])?;
-    tx.execute("DELETE FROM unresolved_refs", [])?;
-
-    // Load all raw calls currently in the database to re-resolve them globally
-    let all_calls = db::get_all_raw_calls(&tx)?;
-
-    let mut name_to_ids: FxHashMap<String, Vec<String>> = FxHashMap::default();
-    let mut id_to_file: FxHashMap<String, String> = FxHashMap::default();
+    let mut symbol_index = parser::SymbolIndexBuilder::default();
     {
-        let mut stmt = tx.prepare("SELECT id, name, file_path FROM nodes")?;
+        let mut stmt = tx.prepare("SELECT id, name, file_path, qualified_name FROM nodes")?;
         let mut rows = stmt.query([])?;
         while let Some(row) = rows.next()? {
             let id: String = row.get(0)?;
             let name: String = row.get(1)?;
             let file: String = row.get(2)?;
-            name_to_ids.entry(name).or_default().push(id.clone());
-            id_to_file.insert(id, file);
+            let qualified_name: Option<String> = row.get(3)?;
+            symbol_index.push(&id, &name, &file, qualified_name.as_deref());
         }
     }
+    let symbol_index = symbol_index.finish();
 
-    let (edges, unresolved) = parser::resolve_calls_global(&all_calls, &name_to_ids, &id_to_file);
+    let calls_to_resolve = if is_fresh_build {
+        tx.execute("DELETE FROM edges", [])?;
+        tx.execute("DELETE FROM unresolved_refs", [])?;
+        db::get_all_raw_calls(&tx)?
+    } else {
+        for name in &changed_symbol_names {
+            for source_id in db::get_raw_call_source_ids_by_callee_simple(&tx, name)? {
+                affected_source_ids.insert(source_id);
+            }
+            for source_id in db::get_unresolved_source_ids_by_specifier_simple(&tx, name)? {
+                affected_source_ids.insert(source_id);
+            }
+        }
+
+        let mut calls = Vec::new();
+        let mut seen_calls = FxHashSet::default();
+        for source_id in &affected_source_ids {
+            db::delete_edges_for_source_id(&tx, source_id)?;
+            db::delete_unresolved_refs_for_source_id(&tx, source_id)?;
+            for call in db::get_raw_calls_for_source_id(&tx, source_id)? {
+                let key = (
+                    call.caller_id.clone(),
+                    call.callee_name.clone(),
+                    call.line,
+                    call.column,
+                );
+                if seen_calls.insert(key) {
+                    calls.push(call);
+                }
+            }
+        }
+        calls
+    };
+
+    let (edges, unresolved) = parser::resolve_calls_global(&calls_to_resolve, &symbol_index);
     let edge_count = edges.len();
 
     // Edges reference existing nodes by construction; verify against the
     // in-memory id set rather than a SQL point query per endpoint (millions of
     // lookups on large repos).
     for edge in edges {
-        if id_to_file.contains_key(&edge.source_id) && id_to_file.contains_key(&edge.target_id) {
+        if symbol_index.by_id.contains_key(&edge.source_id)
+            && symbol_index.by_id.contains_key(&edge.target_id)
+        {
             db::upsert_edge(&tx, &edge)?;
         }
     }
@@ -328,8 +381,9 @@ pub fn run_init(workspace: &Path) -> Result<(), Box<dyn Error>> {
         db::insert_unresolved_ref(&tx, uref)?;
     }
     info!(
-        "Resolved {} call edges; {} unresolved references recorded.",
+        "Resolved {} call edges from {} raw calls; {} unresolved references recorded.",
         edge_count,
+        calls_to_resolve.len(),
         unresolved.len()
     );
 
@@ -347,6 +401,11 @@ pub fn run_init(workspace: &Path) -> Result<(), Box<dyn Error>> {
         .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
         .unwrap_or_else(|| "Unknown".to_string());
     db::upsert_project_metadata(&tx, "indexed_at", Some(&indexed_at))?;
+
+    if is_fresh_build {
+        db::rebuild_node_fts(&tx)?;
+        db::create_node_fts_triggers(&tx)?;
+    }
 
     tx.commit()?;
 
@@ -1280,6 +1339,183 @@ mod tests {
             )
             .unwrap();
         assert_eq!(unresolved, 1, "expected one unresolved reference");
+
+        fs::remove_dir_all(&temp_workspace).unwrap();
+    }
+
+    #[test]
+    fn test_fresh_init_rebuilds_fts_index() {
+        let temp_workspace = create_temp_dir();
+        let src_dir = temp_workspace.join("src");
+        fs::create_dir_all(&src_dir).unwrap();
+        fs::write(
+            src_dir.join("main.rs"),
+            "/// Performs a searchable calibration.\nfn calibrate() {}\n",
+        )
+        .unwrap();
+
+        run_init(&temp_workspace).unwrap();
+
+        let db_path = temp_workspace.join(".ochna").join("ochna.db");
+        let conn = Connection::open(&db_path).unwrap();
+        let fts_results = db::search_nodes_fts(&conn, "calibration").unwrap();
+        assert_eq!(fts_results.len(), 1);
+        assert_eq!(fts_results[0].name, "calibrate");
+
+        fs::remove_dir_all(&temp_workspace).unwrap();
+    }
+
+    #[test]
+    fn test_incremental_sync_keeps_fts_triggers_after_fresh_rebuild() {
+        let temp_workspace = create_temp_dir();
+        let src_dir = temp_workspace.join("src");
+        fs::create_dir_all(&src_dir).unwrap();
+        let rust_file = src_dir.join("main.rs");
+        fs::write(
+            &rust_file,
+            "/// Mentions the original marker.\nfn searchable() {}\n",
+        )
+        .unwrap();
+
+        run_init(&temp_workspace).unwrap();
+
+        let db_path = temp_workspace.join(".ochna").join("ochna.db");
+        let conn = Connection::open(&db_path).unwrap();
+        assert_eq!(db::search_nodes_fts(&conn, "original").unwrap().len(), 1);
+
+        fs::write(
+            &rust_file,
+            "/// Mentions the replacement marker.\nfn searchable() {}\n",
+        )
+        .unwrap();
+        run_init(&temp_workspace).unwrap();
+
+        assert_eq!(db::search_nodes_fts(&conn, "replacement").unwrap().len(), 1);
+        assert!(
+            db::search_nodes_fts(&conn, "original").unwrap().is_empty(),
+            "updated file should remove stale FTS content"
+        );
+
+        fs::remove_file(&rust_file).unwrap();
+        run_init(&temp_workspace).unwrap();
+
+        assert!(
+            db::search_nodes_fts(&conn, "replacement")
+                .unwrap()
+                .is_empty(),
+            "deleted file should remove FTS content"
+        );
+
+        fs::remove_dir_all(&temp_workspace).unwrap();
+    }
+
+    #[test]
+    fn test_incremental_sync_re_resolves_unmodified_incoming_callers() {
+        let temp_workspace = create_temp_dir();
+        let src_dir = temp_workspace.join("src");
+        fs::create_dir_all(&src_dir).unwrap();
+        let caller_file = src_dir.join("a.rs");
+        let old_target_file = src_dir.join("b.rs");
+        let new_target_file = src_dir.join("c.rs");
+        fs::write(
+            &caller_file,
+            "fn caller() {\n    target();\n    local_keep();\n}\nfn local_keep() {}\n",
+        )
+        .unwrap();
+        fs::write(&old_target_file, "fn target() {}\n").unwrap();
+
+        run_init(&temp_workspace).unwrap();
+
+        fs::write(&old_target_file, "fn other() {}\n").unwrap();
+        fs::write(&new_target_file, "fn target() {}\n").unwrap();
+        run_init(&temp_workspace).unwrap();
+
+        let db_path = temp_workspace.join(".ochna").join("ochna.db");
+        let conn = Connection::open(&db_path).unwrap();
+        let moved_edge: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM edges
+                 WHERE source_id = 'src/a.rs::caller'
+                   AND target_id = 'src/c.rs::target'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            moved_edge, 1,
+            "unmodified caller should point at new target"
+        );
+
+        let stale_edge: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM edges
+                 WHERE source_id = 'src/a.rs::caller'
+                   AND target_id = 'src/b.rs::target'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(stale_edge, 0, "stale target edge should be removed");
+
+        let preserved_edge: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM edges
+                 WHERE source_id = 'src/a.rs::caller'
+                   AND target_id = 'src/a.rs::local_keep'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            preserved_edge, 1,
+            "other edges from the source are reinserted"
+        );
+
+        fs::remove_dir_all(&temp_workspace).unwrap();
+    }
+
+    #[test]
+    fn test_incremental_sync_re_resolves_matching_unresolved_refs() {
+        let temp_workspace = create_temp_dir();
+        let src_dir = temp_workspace.join("src");
+        fs::create_dir_all(&src_dir).unwrap();
+        fs::write(src_dir.join("a.rs"), "fn caller() {\n    missing();\n}\n").unwrap();
+
+        run_init(&temp_workspace).unwrap();
+
+        let db_path = temp_workspace.join(".ochna").join("ochna.db");
+        let conn = Connection::open(&db_path).unwrap();
+        let unresolved_before: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM unresolved_refs WHERE specifier = 'missing'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(unresolved_before, 1);
+
+        fs::write(src_dir.join("b.rs"), "fn missing() {}\n").unwrap();
+        run_init(&temp_workspace).unwrap();
+
+        let resolved_edge: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM edges
+                 WHERE source_id = 'src/a.rs::caller'
+                   AND target_id = 'src/b.rs::missing'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(resolved_edge, 1);
+
+        let unresolved_after: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM unresolved_refs WHERE specifier = 'missing'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(unresolved_after, 0);
 
         fs::remove_dir_all(&temp_workspace).unwrap();
     }
