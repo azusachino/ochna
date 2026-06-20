@@ -2,7 +2,7 @@ use crate::db;
 use crate::parser;
 use rayon::prelude::*;
 use rusqlite::Connection;
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 use serde_json::json;
 use std::collections::hash_map::DefaultHasher;
 use std::error::Error;
@@ -171,12 +171,15 @@ pub fn run_init(workspace: &Path) -> Result<(), Box<dyn Error>> {
 
     // Prune files that are no longer on disk
     {
+        let disk_files: FxHashSet<String> = files
+            .iter()
+            .map(|path| path.to_string_lossy().into_owned())
+            .collect();
         let mut stmt = tx.prepare("SELECT file_path FROM files")?;
         let db_files: Result<Vec<String>, _> = stmt.query_map([], |row| row.get(0))?.collect();
         let db_files = db_files?;
         for db_file in db_files {
-            let exists = files.iter().any(|f| f.to_string_lossy() == db_file);
-            if !exists {
+            if !disk_files.contains(&db_file) {
                 info!("Pruning deleted file from index: {}", db_file);
                 db::delete_file_data(&tx, &db_file)?;
             }
@@ -299,28 +302,44 @@ pub fn run_init(workspace: &Path) -> Result<(), Box<dyn Error>> {
     // Load all raw calls currently in the database to re-resolve them globally
     let all_calls = db::get_all_raw_calls(&tx)?;
 
-    let mut name_to_ids: FxHashMap<String, Vec<String>> = FxHashMap::default();
-    let mut id_to_file: FxHashMap<String, String> = FxHashMap::default();
+    let mut symbols = Vec::new();
+    let mut by_name: FxHashMap<String, parser::CandidateList> = FxHashMap::default();
+    let mut by_name_file: FxHashMap<String, parser::CandidateByFile> = FxHashMap::default();
+    let mut by_id: FxHashMap<String, parser::SymbolIx> = FxHashMap::default();
     {
-        let mut stmt = tx.prepare("SELECT id, name, file_path FROM nodes")?;
+        let mut stmt = tx.prepare("SELECT id, name, file_path, qualified_name FROM nodes")?;
         let mut rows = stmt.query([])?;
         while let Some(row) = rows.next()? {
             let id: String = row.get(0)?;
             let name: String = row.get(1)?;
             let file: String = row.get(2)?;
-            name_to_ids.entry(name).or_default().push(id.clone());
-            id_to_file.insert(id, file);
+            let qualified_name: Option<String> = row.get(3)?;
+            let ix = symbols.len() as parser::SymbolIx;
+            symbols.push(parser::SymbolCandidate::new(
+                id.clone(),
+                file.clone(),
+                qualified_name,
+            ));
+            by_name.entry(name.clone()).or_default().push(ix);
+            by_name_file
+                .entry(name)
+                .or_default()
+                .entry(file)
+                .or_default()
+                .push(ix);
+            by_id.insert(id, ix);
         }
     }
 
-    let (edges, unresolved) = parser::resolve_calls_global(&all_calls, &name_to_ids, &id_to_file);
+    let (edges, unresolved) =
+        parser::resolve_calls_global(&all_calls, &symbols, &by_name, &by_name_file, &by_id);
     let edge_count = edges.len();
 
     // Edges reference existing nodes by construction; verify against the
     // in-memory id set rather than a SQL point query per endpoint (millions of
     // lookups on large repos).
     for edge in edges {
-        if id_to_file.contains_key(&edge.source_id) && id_to_file.contains_key(&edge.target_id) {
+        if by_id.contains_key(&edge.source_id) && by_id.contains_key(&edge.target_id) {
             db::upsert_edge(&tx, &edge)?;
         }
     }

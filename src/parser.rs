@@ -1,7 +1,38 @@
 use crate::db::{Edge, Node, RawCall, UnresolvedRef};
-use std::collections::HashMap;
+use rustc_hash::FxHashMap;
+use smallvec::SmallVec;
 use std::error::Error;
 use tree_sitter::Parser;
+
+pub type SymbolIx = u32;
+pub type CandidateList = SmallVec<[SymbolIx; 4]>;
+pub type CandidateByFile = FxHashMap<String, CandidateList>;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SymbolCandidate {
+    pub id: String,
+    pub file_path: String,
+    pub namespace: Option<String>,
+}
+
+impl SymbolCandidate {
+    pub fn new(id: String, file_path: String, qualified_name: Option<String>) -> Self {
+        let namespace = qualified_name
+            .as_deref()
+            .and_then(parent_namespace)
+            .map(str::to_string);
+        Self {
+            id,
+            file_path,
+            namespace,
+        }
+    }
+}
+
+fn parent_namespace(qualified_name: &str) -> Option<&str> {
+    let (parent, _) = qualified_name.rsplit_once("::")?;
+    parent.rsplit("::").next()
+}
 
 /// Build a [`RawCall`] from a caller id, callee name, and the call-site AST node
 /// (whose start position records where the call occurs).
@@ -106,22 +137,25 @@ pub fn parse_code(
 /// unique match anywhere in the project. Calls that match no known symbol are
 /// returned separately as [`UnresolvedRef`]s.
 ///
-/// - `name_to_ids` maps a symbol's simple name to every node id that bears it.
-/// - `id_to_file` maps a node id to the file it is defined in.
-pub fn resolve_calls_global<S: std::hash::BuildHasher>(
+/// - `symbols` stores the candidate metadata indexed by `SymbolIx`.
+/// - `by_name` maps a symbol's simple name to every candidate index that bears it.
+/// - `by_name_file` maps simple name, then file, to same-file candidate indices.
+/// - `by_id` maps a node id to its candidate index.
+pub fn resolve_calls_global(
     calls: &[RawCall],
-    name_to_ids: &HashMap<String, Vec<String>, S>,
-    id_to_file: &HashMap<String, String, S>,
+    symbols: &[SymbolCandidate],
+    by_name: &FxHashMap<String, CandidateList>,
+    by_name_file: &FxHashMap<String, CandidateByFile>,
+    by_id: &FxHashMap<String, SymbolIx>,
 ) -> (Vec<Edge>, Vec<UnresolvedRef>) {
     let mut edges = Vec::new();
     let mut unresolved = Vec::new();
 
     for call in calls {
-        let name_parts: Vec<&str> = call.callee_name.split("::").collect();
-        let simple_name = name_parts.last().copied().unwrap_or(&call.callee_name);
+        let (call_namespace, simple_name) = call_namespace_and_simple_name(&call.callee_name);
 
-        let candidates = match name_to_ids.get(simple_name) {
-            Some(ids) if !ids.is_empty() => ids,
+        let candidates = match by_name.get(simple_name) {
+            Some(indices) if !indices.is_empty() => indices,
             _ => {
                 unresolved.push(UnresolvedRef {
                     id: None,
@@ -136,22 +170,27 @@ pub fn resolve_calls_global<S: std::hash::BuildHasher>(
         };
 
         // Prefer a target defined in the caller's own file, else consider all matches.
-        let caller_file = id_to_file.get(&call.caller_id);
-        let same_file: Vec<&String> = candidates
-            .iter()
-            .filter(|id| id_to_file.get(*id) == caller_file && caller_file.is_some())
-            .collect();
-        let working_set: Vec<&String> = if !same_file.is_empty() {
-            same_file
+        let caller = by_id
+            .get(&call.caller_id)
+            .and_then(|ix| symbols.get(*ix as usize));
+        let same_file = caller.and_then(|caller| {
+            by_name_file
+                .get(simple_name)
+                .and_then(|by_file| by_file.get(&caller.file_path))
+        });
+        let working_set = if let Some(indices) = same_file.filter(|indices| !indices.is_empty()) {
+            indices.as_slice()
         } else {
-            candidates.iter().collect()
+            candidates.as_slice()
         };
 
         let target_id = if working_set.len() == 1 {
-            working_set[0].clone()
+            symbols[working_set[0] as usize].id.clone()
         } else {
-            disambiguate(&working_set, &name_parts, &call.caller_id)
-                .unwrap_or_else(|| working_set[0].clone())
+            let caller_namespace = caller.and_then(|symbol| symbol.namespace.as_deref());
+            let target_ix = disambiguate(working_set, symbols, call_namespace, caller_namespace)
+                .unwrap_or(working_set[0]);
+            symbols[target_ix as usize].id.clone()
         };
 
         edges.push(Edge {
@@ -174,40 +213,71 @@ pub fn resolve_calls_global<S: std::hash::BuildHasher>(
 /// Pick a target among several same-named candidates using namespace and
 /// receiver context. Case A: the call carries an explicit namespace
 /// (e.g. `Point::new`). Case B: fall back to the caller's own struct/class.
-fn disambiguate(candidates: &[&String], name_parts: &[&str], caller_id: &str) -> Option<String> {
+fn disambiguate(
+    candidates: &[SymbolIx],
+    symbols: &[SymbolCandidate],
+    call_namespace: Option<&str>,
+    caller_namespace: Option<&str>,
+) -> Option<SymbolIx> {
     // Case A: explicit namespace on the call target.
-    if name_parts.len() >= 2 {
-        let ns_infix = format!("::{}::", name_parts[name_parts.len() - 2]);
-        if let Some(m) = candidates.iter().find(|id| id.contains(&ns_infix)) {
-            return Some((*m).clone());
+    if let Some(namespace) = call_namespace {
+        if let Some(candidate) = candidates.iter().copied().find(|ix| {
+            symbols
+                .get(*ix as usize)
+                .and_then(|symbol| symbol.namespace.as_deref())
+                == Some(namespace)
+        }) {
+            return Some(candidate);
         }
     }
 
     // Case B: caller is a method/constructor — prefer a target on the same receiver.
-    let caller_parts: Vec<&str> = caller_id.split("::").collect();
-    if caller_parts.len() >= 3 {
-        let struct_prefix = format!("::{}::", caller_parts[caller_parts.len() - 2]);
-        if let Some(m) = candidates.iter().find(|id| id.contains(&struct_prefix)) {
-            return Some((*m).clone());
+    if let Some(namespace) = caller_namespace {
+        if let Some(candidate) = candidates.iter().copied().find(|ix| {
+            symbols
+                .get(*ix as usize)
+                .and_then(|symbol| symbol.namespace.as_deref())
+                == Some(namespace)
+        }) {
+            return Some(candidate);
         }
     }
 
     None
 }
 
+fn call_namespace_and_simple_name(callee_name: &str) -> (Option<&str>, &str) {
+    if let Some((namespace, simple_name)) = callee_name.rsplit_once("::") {
+        (namespace.rsplit("::").next(), simple_name)
+    } else {
+        (None, callee_name)
+    }
+}
+
 /// Resolve call sites against only the given `nodes` (single-file scope). A thin
 /// wrapper over [`resolve_calls_global`] used in tests and isolated parsing.
 pub fn resolve_calls_local(nodes: &[Node], calls: &[RawCall]) -> Vec<Edge> {
-    let mut name_to_ids: HashMap<String, Vec<String>> = HashMap::new();
-    let mut id_to_file: HashMap<String, String> = HashMap::new();
+    let mut symbols = Vec::with_capacity(nodes.len());
+    let mut by_name: FxHashMap<String, CandidateList> = FxHashMap::default();
+    let mut by_name_file: FxHashMap<String, CandidateByFile> = FxHashMap::default();
+    let mut by_id: FxHashMap<String, SymbolIx> = FxHashMap::default();
     for n in nodes {
-        name_to_ids
+        let ix = symbols.len() as SymbolIx;
+        symbols.push(SymbolCandidate::new(
+            n.id.clone(),
+            n.file_path.clone(),
+            n.qualified_name.clone(),
+        ));
+        by_name.entry(n.name.clone()).or_default().push(ix);
+        by_name_file
             .entry(n.name.clone())
             .or_default()
-            .push(n.id.clone());
-        id_to_file.insert(n.id.clone(), n.file_path.clone());
+            .entry(n.file_path.clone())
+            .or_default()
+            .push(ix);
+        by_id.insert(n.id.clone(), ix);
     }
-    resolve_calls_global(calls, &name_to_ids, &id_to_file).0
+    resolve_calls_global(calls, &symbols, &by_name, &by_name_file, &by_id).0
 }
 
 /// Recursively traverses a Rust AST.
@@ -398,18 +468,17 @@ fn traverse_rust<'a>(
         _ => {}
     }
 
-    for i in 0..node.child_count() {
-        if let Some(child) = node.child(i) {
-            traverse_rust(
-                child,
-                content,
-                file_path,
-                next_impl_struct,
-                nodes,
-                calls,
-                next_caller_id,
-            );
-        }
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        traverse_rust(
+            child,
+            content,
+            file_path,
+            next_impl_struct,
+            nodes,
+            calls,
+            next_caller_id,
+        );
     }
 }
 
@@ -588,10 +657,9 @@ fn traverse_go<'a>(
         _ => {}
     }
 
-    for i in 0..node.child_count() {
-        if let Some(child) = node.child(i) {
-            traverse_go(child, content, file_path, nodes, calls, next_caller_id);
-        }
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        traverse_go(child, content, file_path, nodes, calls, next_caller_id);
     }
 }
 
@@ -601,11 +669,10 @@ fn get_go_receiver_type(receiver_node: tree_sitter::Node, content: &str) -> Opti
         if node.kind() == "type_identifier" {
             return Some(node.utf8_text(content.as_bytes()).unwrap_or("").to_string());
         }
-        for i in 0..node.child_count() {
-            if let Some(child) = node.child(i) {
-                if let Some(res) = find_type_id(child, content) {
-                    return Some(res);
-                }
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            if let Some(res) = find_type_id(child, content) {
+                return Some(res);
             }
         }
         None
@@ -638,21 +705,15 @@ fn find_child_by_kind<'a>(
     node: tree_sitter::Node<'a>,
     kind: &str,
 ) -> Option<tree_sitter::Node<'a>> {
-    for i in 0..node.child_count() {
-        if let Some(child) = node.child(i) {
-            if child.kind() == kind {
-                return Some(child);
-            }
-        }
-    }
-    None
+    node.children(&mut node.walk())
+        .find(|child| child.kind() == kind)
 }
 
 /// Extracts clean signature from node.
 fn get_signature(node: tree_sitter::Node, content: &str) -> String {
     let mut body_node = None;
-    for i in 0..node.child_count() {
-        let child = node.child(i).unwrap();
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
         let kind = child.kind();
         if kind == "block"
             || kind == "field_declaration_list"
@@ -745,11 +806,10 @@ fn last_descendant_by_kind<'a>(
         None
     };
 
-    for i in 0..node.child_count() {
-        if let Some(child) = node.child(i) {
-            if let Some(candidate) = last_descendant_by_kind(child, kinds) {
-                found = Some(candidate);
-            }
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        if let Some(candidate) = last_descendant_by_kind(child, kinds) {
+            found = Some(candidate);
         }
     }
 
@@ -963,18 +1023,17 @@ fn traverse_c_like<'a>(
         _ => {}
     }
 
-    for i in 0..node.child_count() {
-        if let Some(child) = node.child(i) {
-            traverse_c_like(
-                child,
-                content,
-                file_path,
-                nodes,
-                calls,
-                next_context,
-                next_caller_id,
-            );
-        }
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        traverse_c_like(
+            child,
+            content,
+            file_path,
+            nodes,
+            calls,
+            next_context,
+            next_caller_id,
+        );
     }
 }
 
@@ -1094,18 +1153,17 @@ fn traverse_zig<'a>(
         _ => {}
     }
 
-    for i in 0..node.child_count() {
-        if let Some(child) = node.child(i) {
-            traverse_zig(
-                child,
-                content,
-                file_path,
-                nodes,
-                calls,
-                next_parent_qualified_name,
-                next_caller_id,
-            );
-        }
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        traverse_zig(
+            child,
+            content,
+            file_path,
+            nodes,
+            calls,
+            next_parent_qualified_name,
+            next_caller_id,
+        );
     }
 }
 
@@ -1243,18 +1301,17 @@ fn traverse_java<'a>(
         _ => {}
     }
 
-    for i in 0..node.child_count() {
-        if let Some(child) = node.child(i) {
-            traverse_java(
-                child,
-                content,
-                file_path,
-                nodes,
-                calls,
-                next_parent_qualified_name,
-                next_caller_id,
-            );
-        }
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        traverse_java(
+            child,
+            content,
+            file_path,
+            nodes,
+            calls,
+            next_parent_qualified_name,
+            next_caller_id,
+        );
     }
 }
 
@@ -1396,6 +1453,63 @@ fn test_free_fn() {
             .find(|e| e.source_id == free_fn.id && e.target_id == sum_method.id)
             .unwrap();
         assert_eq!(edge_free_sum.kind, "calls");
+    }
+
+    #[test]
+    fn test_resolve_calls_global_prefers_explicit_namespace() {
+        let nodes = vec![
+            Node {
+                id: "src/shapes.rs::Point::new".to_string(),
+                name: "new".to_string(),
+                kind: "method".to_string(),
+                qualified_name: Some("Point::new".to_string()),
+                file_path: "src/shapes.rs".to_string(),
+                start_line: 1,
+                end_line: 1,
+                start_column: 0,
+                end_column: 0,
+                signature: None,
+                doc_comment: None,
+            },
+            Node {
+                id: "src/shapes.rs::Line::new".to_string(),
+                name: "new".to_string(),
+                kind: "method".to_string(),
+                qualified_name: Some("Line::new".to_string()),
+                file_path: "src/shapes.rs".to_string(),
+                start_line: 2,
+                end_line: 2,
+                start_column: 0,
+                end_column: 0,
+                signature: None,
+                doc_comment: None,
+            },
+            Node {
+                id: "src/shapes.rs::build".to_string(),
+                name: "build".to_string(),
+                kind: "function".to_string(),
+                qualified_name: Some("build".to_string()),
+                file_path: "src/shapes.rs".to_string(),
+                start_line: 3,
+                end_line: 3,
+                start_column: 0,
+                end_column: 0,
+                signature: None,
+                doc_comment: None,
+            },
+        ];
+        let calls = vec![RawCall {
+            caller_id: "src/shapes.rs::build".to_string(),
+            callee_name: "Line::new".to_string(),
+            line: 3,
+            column: 4,
+        }];
+
+        let edges = resolve_calls_local(&nodes, &calls);
+
+        assert_eq!(edges.len(), 1);
+        assert_eq!(edges[0].source_id, "src/shapes.rs::build");
+        assert_eq!(edges[0].target_id, "src/shapes.rs::Line::new");
     }
 
     #[test]
