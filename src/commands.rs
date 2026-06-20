@@ -145,12 +145,21 @@ pub fn run_init(workspace: &Path) -> Result<(), Box<dyn Error>> {
     }
 
     let db_path = ochna_dir.join("ochna.db");
+    // A brand-new DB is a full build that is entirely re-derivable from source,
+    // so we can relax durability for a large I/O win — a crash mid-build just
+    // means re-running. An existing DB means this is an incremental update
+    // (`sync`, or a re-`init`) mutating data we don't want to lose to a crash,
+    // so it stays crash-safe on WAL + synchronous=NORMAL (the safe-and-fast WAL
+    // pairing). WAL persists in the DB header, so subsequent queries get it too.
+    let is_fresh_build = !db_path.exists();
     let mut conn = Connection::open(&db_path)?;
-    // Bulk-load tuning. The index is fully derived from source and rebuilt by a
-    // single transaction here, so durability can be relaxed for a large I/O win;
-    // a crash mid-build just means re-running `init`.
-    conn.pragma_update(None, "journal_mode", "MEMORY")?;
-    conn.pragma_update(None, "synchronous", "OFF")?;
+    if is_fresh_build {
+        conn.pragma_update(None, "journal_mode", "MEMORY")?;
+        conn.pragma_update(None, "synchronous", "OFF")?;
+    } else {
+        conn.pragma_update(None, "journal_mode", "WAL")?;
+        conn.pragma_update(None, "synchronous", "NORMAL")?;
+    }
     conn.pragma_update(None, "temp_store", "MEMORY")?;
     conn.pragma_update(None, "cache_size", -262_144)?; // ~256 MB page cache
     db::init_schema(&conn)?;
