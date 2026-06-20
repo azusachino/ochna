@@ -920,11 +920,15 @@ fn traverse_c_like<'a>(
                             .unwrap_or(&raw_name)
                             .trim_start_matches('~')
                             .to_string();
-                        let qname = if raw_name.contains("::") {
-                            raw_name.clone()
+                        // Out-of-line definitions (`Point::sum`) carry their own
+                        // path; still prefix any enclosing namespace so the qname
+                        // matches the in-class symbol (e.g. `demo::Point::sum`).
+                        let name_for_qual = if raw_name.contains("::") {
+                            &raw_name
                         } else {
-                            qualified_name(context.parent_qualified_name, &simple_name)
+                            &simple_name
                         };
+                        let qname = qualified_name(context.parent_qualified_name, name_for_qual);
                         let kind = if context.parent_is_type || raw_name.contains("::") {
                             "method"
                         } else {
@@ -979,16 +983,36 @@ fn zig_variable_name(node: tree_sitter::Node, content: &str) -> Option<String> {
 }
 
 fn zig_variable_kind(node: tree_sitter::Node, content: &str) -> Option<&'static str> {
+    // Only inspect the initializer (right of the first `=`) and require the
+    // container keyword to lead it, so a keyword inside the variable name, a
+    // string literal, or a function argument doesn't trigger a false positive.
     let text = text_for_node(node, content);
-    if text.contains("struct") {
-        Some("struct")
-    } else if text.contains("enum") {
-        Some("enum")
-    } else if text.contains("union") {
-        Some("union")
-    } else {
-        None
+    let init = text.split_once('=').map(|(_, rhs)| rhs).unwrap_or("");
+    zig_container_kind(init)
+}
+
+fn zig_container_kind(init: &str) -> Option<&'static str> {
+    // Skip an optional layout qualifier before the container keyword.
+    let init = init.trim_start();
+    let init = init
+        .strip_prefix("packed ")
+        .or_else(|| init.strip_prefix("extern "))
+        .unwrap_or(init)
+        .trim_start();
+    for (keyword, kind) in [("struct", "struct"), ("enum", "enum"), ("union", "union")] {
+        if let Some(rest) = init.strip_prefix(keyword) {
+            // A standalone keyword is followed by a body/tag, not more of an
+            // identifier (rules out names like `structFoo`).
+            if rest
+                .chars()
+                .next()
+                .is_none_or(|c| !c.is_alphanumeric() && c != '_')
+            {
+                return Some(kind);
+            }
+        }
     }
+    None
 }
 
 fn extract_zig_call_target(node: tree_sitter::Node, content: &str) -> String {
@@ -1792,5 +1816,54 @@ pub fn main() void {
             .find(|e| e.source_id == main.id && e.target_id == sum_method.id)
             .unwrap();
         assert_eq!(edge_main_sum.kind, "calls");
+    }
+
+    #[test]
+    fn test_parse_cpp_out_of_line_method() {
+        // An out-of-line method defined inside its namespace should inherit the
+        // namespace prefix so it matches the in-class declaration's qname.
+        let cpp_code = r#"
+namespace demo {
+class Point {
+public:
+    int sum();
+};
+
+int Point::sum() {
+    return 42;
+}
+}
+"#;
+
+        let (nodes, _calls) = parse_code("src/point.cpp", cpp_code, "cpp").unwrap();
+
+        let sum_method = nodes
+            .iter()
+            .find(|n| n.name == "sum" && n.kind == "method")
+            .unwrap();
+        assert_eq!(sum_method.id, "src/point.cpp::demo::Point::sum");
+    }
+
+    #[test]
+    fn test_parse_zig_keyword_in_string_is_not_a_type() {
+        // The container-kind heuristic must not treat a string literal (or a
+        // plain value) containing "struct"/"enum"/"union" as a type symbol.
+        let zig_code = r#"
+const message = "this mentions a struct and an enum";
+const Real = struct {
+    x: i32,
+};
+"#;
+
+        let (nodes, _calls) = parse_code("src/main.zig", zig_code, "zig").unwrap();
+
+        assert!(
+            nodes.iter().all(|n| n.name != "message"),
+            "string-valued const should not be indexed as a type"
+        );
+        assert!(
+            nodes.iter().any(|n| n.name == "Real" && n.kind == "struct"),
+            "genuine struct declaration should still be indexed"
+        );
     }
 }

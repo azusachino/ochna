@@ -43,6 +43,8 @@ fn language_for_path(path: &Path) -> Option<&'static str> {
         "rs" => Some("rust"),
         "go" => Some("go"),
         "java" => Some("java"),
+        // `.h` is ambiguous (C vs C++); we treat it as C. C++-only headers
+        // should use `.hpp`/`.hh`/`.hxx` to parse with the C++ grammar.
         "c" | "h" => Some("c"),
         "cc" | "cpp" | "cxx" | "hh" | "hpp" | "hxx" => Some("cpp"),
         "zig" => Some("zig"),
