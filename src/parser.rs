@@ -139,12 +139,12 @@ fn parent_namespace(qualified_name: &str) -> Option<&str> {
 /// (whose start position records where the call occurs).
 fn raw_call(caller_id: &str, callee_name: String, call_node: tree_sitter::Node) -> RawCall {
     let pos = call_node.start_position();
-    RawCall {
-        caller_id: caller_id.to_string(),
+    RawCall::new(
+        caller_id.to_string(),
         callee_name,
-        line: (pos.row + 1) as i64,
-        column: pos.column as i64,
-    }
+        (pos.row + 1) as i64,
+        pos.column as i64,
+    )
 }
 
 /// Parse supported source and extract nodes (symbols) plus the raw,
@@ -1594,12 +1594,12 @@ fn test_free_fn() {
                 doc_comment: None,
             },
         ];
-        let calls = vec![RawCall {
-            caller_id: "src/shapes.rs::build".to_string(),
-            callee_name: "Line::new".to_string(),
-            line: 3,
-            column: 4,
-        }];
+        let calls = vec![RawCall::new(
+            "src/shapes.rs::build".to_string(),
+            "Line::new".to_string(),
+            3,
+            4,
+        )];
 
         let edges = resolve_calls_local(&nodes, &calls);
 

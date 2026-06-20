@@ -52,8 +52,43 @@ pub struct UnresolvedRef {
 pub struct RawCall {
     pub caller_id: String,
     pub callee_name: String,
+    pub callee_simple: String,
+    pub callee_scope: Option<String>,
+    pub caller_file: String,
     pub line: i64,
     pub column: i64,
+}
+
+impl RawCall {
+    pub fn new(caller_id: String, callee_name: String, line: i64, column: i64) -> Self {
+        let (callee_scope, callee_simple) = split_callee_name(&callee_name);
+        let caller_file = caller_file_from_id(&caller_id);
+        Self {
+            caller_id,
+            callee_name,
+            callee_simple,
+            callee_scope,
+            caller_file,
+            line,
+            column,
+        }
+    }
+}
+
+fn split_callee_name(callee_name: &str) -> (Option<String>, String) {
+    if let Some((scope, simple)) = callee_name.rsplit_once("::") {
+        (Some(scope.to_string()), simple.to_string())
+    } else {
+        (None, callee_name.to_string())
+    }
+}
+
+fn caller_file_from_id(caller_id: &str) -> String {
+    caller_id
+        .split_once("::")
+        .map(|(file_path, _)| file_path)
+        .unwrap_or(caller_id)
+        .to_string()
 }
 
 /// Initialize the SQLite database schema.
@@ -129,15 +164,27 @@ pub fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
         "CREATE TABLE IF NOT EXISTS raw_calls (
             caller_id TEXT NOT NULL,
             callee_name TEXT NOT NULL,
+            callee_simple TEXT,
+            callee_scope TEXT,
+            caller_file TEXT,
             line INTEGER NOT NULL,
             column INTEGER NOT NULL,
             FOREIGN KEY (caller_id) REFERENCES nodes(id) ON DELETE CASCADE
          )",
         [],
     )?;
+    migrate_raw_calls_schema(conn)?;
 
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_raw_calls_caller_id ON raw_calls(caller_id)",
+        [],
+    )?;
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_raw_calls_callee_simple ON raw_calls(callee_simple)",
+        [],
+    )?;
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_raw_calls_caller_file ON raw_calls(caller_file)",
         [],
     )?;
 
@@ -240,6 +287,55 @@ pub fn rebuild_node_fts(conn: &Connection) -> rusqlite::Result<()> {
     Ok(())
 }
 
+fn migrate_raw_calls_schema(conn: &Connection) -> rusqlite::Result<()> {
+    let mut stmt = conn.prepare("PRAGMA table_info(raw_calls)")?;
+    let columns = stmt
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+
+    if !columns.iter().any(|column| column == "callee_simple") {
+        conn.execute("ALTER TABLE raw_calls ADD COLUMN callee_simple TEXT", [])?;
+    }
+    if !columns.iter().any(|column| column == "callee_scope") {
+        conn.execute("ALTER TABLE raw_calls ADD COLUMN callee_scope TEXT", [])?;
+    }
+    if !columns.iter().any(|column| column == "caller_file") {
+        conn.execute("ALTER TABLE raw_calls ADD COLUMN caller_file TEXT", [])?;
+    }
+
+    let mut stmt = conn.prepare(
+        "SELECT rowid, caller_id, callee_name FROM raw_calls
+         WHERE callee_simple IS NULL OR caller_file IS NULL",
+    )?;
+    let rows = stmt
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    drop(stmt);
+
+    for (rowid, caller_id, callee_name) in rows {
+        let call = RawCall::new(caller_id, callee_name, 0, 0);
+        conn.execute(
+            "UPDATE raw_calls
+             SET callee_simple = ?, callee_scope = ?, caller_file = ?
+             WHERE rowid = ?",
+            (
+                &call.callee_simple,
+                &call.callee_scope,
+                &call.caller_file,
+                rowid,
+            ),
+        )?;
+    }
+
+    Ok(())
+}
+
 /// Helper mapping database Row back to a Node structure
 fn map_row_to_node(row: &rusqlite::Row) -> rusqlite::Result<Node> {
     Ok(Node {
@@ -322,6 +418,78 @@ pub fn delete_file_data(conn: &Connection, file_path: &str) -> rusqlite::Result<
     // Also delete the file metadata entry
     conn.execute("DELETE FROM files WHERE file_path = ?", [file_path])?;
 
+    Ok(())
+}
+
+pub fn get_node_ids_and_names_for_file(
+    conn: &Connection,
+    file_path: &str,
+) -> rusqlite::Result<Vec<(String, String)>> {
+    let mut stmt = conn.prepare("SELECT id, name FROM nodes WHERE file_path = ?")?;
+    let rows = stmt.query_map([file_path], |row| Ok((row.get(0)?, row.get(1)?)))?;
+    rows.collect()
+}
+
+pub fn get_raw_call_source_ids_by_callee_simple(
+    conn: &Connection,
+    callee_simple: &str,
+) -> rusqlite::Result<Vec<String>> {
+    let mut stmt =
+        conn.prepare("SELECT DISTINCT caller_id FROM raw_calls WHERE callee_simple = ?")?;
+    let rows = stmt.query_map([callee_simple], |row| row.get(0))?;
+    rows.collect()
+}
+
+pub fn get_unresolved_source_ids_by_specifier_simple(
+    conn: &Connection,
+    specifier_simple: &str,
+) -> rusqlite::Result<Vec<String>> {
+    let like_pattern = format!("%::{}", specifier_simple);
+    let mut stmt = conn.prepare(
+        "SELECT DISTINCT source_id, specifier FROM unresolved_refs
+         WHERE specifier = ? OR specifier LIKE ?",
+    )?;
+    let rows = stmt.query_map([specifier_simple, &like_pattern], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+    })?;
+    let mut source_ids = Vec::new();
+    for row in rows {
+        let (source_id, specifier) = row?;
+        if split_callee_name(&specifier).1 == specifier_simple {
+            source_ids.push(source_id);
+        }
+    }
+    source_ids.sort();
+    source_ids.dedup();
+    Ok(source_ids)
+}
+
+pub fn get_raw_calls_for_source_id(
+    conn: &Connection,
+    source_id: &str,
+) -> rusqlite::Result<Vec<RawCall>> {
+    let mut stmt = conn.prepare(
+        "SELECT caller_id, callee_name, callee_simple, callee_scope, caller_file, line, column
+         FROM raw_calls
+         WHERE caller_id = ?",
+    )?;
+    let rows = stmt.query_map([source_id], map_row_to_raw_call)?;
+    rows.collect()
+}
+
+pub fn delete_edges_for_source_id(conn: &Connection, source_id: &str) -> rusqlite::Result<()> {
+    conn.execute("DELETE FROM edges WHERE source_id = ?", [source_id])?;
+    Ok(())
+}
+
+pub fn delete_unresolved_refs_for_source_id(
+    conn: &Connection,
+    source_id: &str,
+) -> rusqlite::Result<()> {
+    conn.execute(
+        "DELETE FROM unresolved_refs WHERE source_id = ?",
+        [source_id],
+    )?;
     Ok(())
 }
 
@@ -529,29 +697,50 @@ pub fn search_nodes_fts(conn: &Connection, query_str: &str) -> rusqlite::Result<
 /// Insert a raw call into the raw_calls table.
 pub fn insert_raw_call(conn: &Connection, r: &RawCall) -> rusqlite::Result<()> {
     let mut stmt = conn.prepare_cached(
-        "INSERT INTO raw_calls (caller_id, callee_name, line, column)
-         VALUES (?, ?, ?, ?)",
+        "INSERT INTO raw_calls (
+            caller_id, callee_name, callee_simple, callee_scope, caller_file, line, column
+         ) VALUES (?, ?, ?, ?, ?, ?, ?)",
     )?;
-    stmt.execute((&r.caller_id, &r.callee_name, r.line, r.column))?;
+    stmt.execute((
+        &r.caller_id,
+        &r.callee_name,
+        &r.callee_simple,
+        &r.callee_scope,
+        &r.caller_file,
+        r.line,
+        r.column,
+    ))?;
     Ok(())
 }
 
 /// Retrieve all raw calls from the database.
 pub fn get_all_raw_calls(conn: &Connection) -> rusqlite::Result<Vec<RawCall>> {
-    let mut stmt = conn.prepare("SELECT caller_id, callee_name, line, column FROM raw_calls")?;
-    let rows = stmt.query_map([], |row| {
-        Ok(RawCall {
-            caller_id: row.get(0)?,
-            callee_name: row.get(1)?,
-            line: row.get(2)?,
-            column: row.get(3)?,
-        })
-    })?;
+    let mut stmt = conn.prepare(
+        "SELECT caller_id, callee_name, callee_simple, callee_scope, caller_file, line, column
+         FROM raw_calls",
+    )?;
+    let rows = stmt.query_map([], map_row_to_raw_call)?;
     let mut calls = Vec::new();
     for r in rows {
         calls.push(r?);
     }
     Ok(calls)
+}
+
+fn map_row_to_raw_call(row: &rusqlite::Row) -> rusqlite::Result<RawCall> {
+    let caller_id: String = row.get(0)?;
+    let callee_name: String = row.get(1)?;
+    let line: i64 = row.get(5)?;
+    let column: i64 = row.get(6)?;
+    let mut call = RawCall::new(caller_id, callee_name, line, column);
+    if let Some(callee_simple) = row.get::<_, Option<String>>(2)? {
+        call.callee_simple = callee_simple;
+    }
+    call.callee_scope = row.get(3)?;
+    if let Some(caller_file) = row.get::<_, Option<String>>(4)? {
+        call.caller_file = caller_file;
+    }
+    Ok(call)
 }
 
 #[cfg(test)]
