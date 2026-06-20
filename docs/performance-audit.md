@@ -8,6 +8,12 @@ covered here.
 
 Date: 2026-06-20. Baseline: tree-sitter 0.26, rusqlite 0.40 dep bump in flight.
 
+> **Status (0.0.4):** all findings below are implemented — prune-set, resolution
+> index, FTS bulk-rebuild, string interning, and selective incremental
+> re-resolution. See `CHANGELOG.md` for the summary and `BENCHMARK.md` for the
+> measured result (linux fresh index ~275s → ~65s; no-op re-sync ~3s). This
+> document is retained as the design rationale.
+
 ## Symbols
 
 - **F** = source files on disk, **D** = files already recorded in the DB
