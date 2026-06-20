@@ -17,6 +17,6 @@
 	ignore = dirty
 [submodule "clones/zig"]
 	path = clones/zig
-	url = https://github.com/ziglang/zig.git
+	url = https://codeberg.org/ziglang/zig.git
 	shallow = true
 	ignore = dirty
