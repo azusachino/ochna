@@ -108,10 +108,10 @@ pub fn parse_code(
 ///
 /// - `name_to_ids` maps a symbol's simple name to every node id that bears it.
 /// - `id_to_file` maps a node id to the file it is defined in.
-pub fn resolve_calls_global(
+pub fn resolve_calls_global<S: std::hash::BuildHasher>(
     calls: &[RawCall],
-    name_to_ids: &HashMap<String, Vec<String>>,
-    id_to_file: &HashMap<String, String>,
+    name_to_ids: &HashMap<String, Vec<String>, S>,
+    id_to_file: &HashMap<String, String, S>,
 ) -> (Vec<Edge>, Vec<UnresolvedRef>) {
     let mut edges = Vec::new();
     let mut unresolved = Vec::new();

@@ -2,9 +2,9 @@ use crate::db;
 use crate::parser;
 use rayon::prelude::*;
 use rusqlite::Connection;
+use rustc_hash::FxHashMap;
 use serde_json::json;
 use std::collections::hash_map::DefaultHasher;
-use std::collections::HashMap;
 use std::error::Error;
 use std::fs;
 use std::hash::{Hash, Hasher};
@@ -187,7 +187,7 @@ pub fn run_init(workspace: &Path) -> Result<(), Box<dyn Error>> {
 
     // Snapshot existing file metadata once so the modified-check is an in-memory
     // lookup, leaving the parallel phase free of any DB access.
-    let existing_meta: HashMap<String, db::FileMetadata> = {
+    let existing_meta: FxHashMap<String, db::FileMetadata> = {
         let mut stmt = tx.prepare(
             "SELECT file_path, content_hash, language, size_bytes, last_modified FROM files",
         )?;
@@ -299,8 +299,8 @@ pub fn run_init(workspace: &Path) -> Result<(), Box<dyn Error>> {
     // Load all raw calls currently in the database to re-resolve them globally
     let all_calls = db::get_all_raw_calls(&tx)?;
 
-    let mut name_to_ids: HashMap<String, Vec<String>> = HashMap::new();
-    let mut id_to_file: HashMap<String, String> = HashMap::new();
+    let mut name_to_ids: FxHashMap<String, Vec<String>> = FxHashMap::default();
+    let mut id_to_file: FxHashMap<String, String> = FxHashMap::default();
     {
         let mut stmt = tx.prepare("SELECT id, name, file_path FROM nodes")?;
         let mut rows = stmt.query([])?;
