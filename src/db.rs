@@ -239,35 +239,37 @@ fn map_row_to_node(row: &rusqlite::Row) -> rusqlite::Result<Node> {
 
 /// Upsert a node into the database (INSERT OR REPLACE)
 pub fn upsert_node(conn: &Connection, node: &Node) -> rusqlite::Result<()> {
-    conn.execute(
+    // prepare_cached so the statement is parsed once and reused across the
+    // millions of inserts a large repo produces, not re-parsed per row.
+    let mut stmt = conn.prepare_cached(
         "INSERT OR REPLACE INTO nodes (
             id, name, kind, qualified_name, file_path,
             start_line, end_line, start_column, end_column,
             signature, doc_comment
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        (
-            &node.id,
-            &node.name,
-            &node.kind,
-            &node.qualified_name,
-            &node.file_path,
-            node.start_line,
-            node.end_line,
-            node.start_column,
-            node.end_column,
-            &node.signature,
-            &node.doc_comment,
-        ),
     )?;
+    stmt.execute((
+        &node.id,
+        &node.name,
+        &node.kind,
+        &node.qualified_name,
+        &node.file_path,
+        node.start_line,
+        node.end_line,
+        node.start_column,
+        node.end_column,
+        &node.signature,
+        &node.doc_comment,
+    ))?;
     Ok(())
 }
 
 /// Upsert an edge into the database (INSERT OR REPLACE)
 pub fn upsert_edge(conn: &Connection, edge: &Edge) -> rusqlite::Result<()> {
-    conn.execute(
+    let mut stmt = conn.prepare_cached(
         "INSERT OR REPLACE INTO edges (source_id, target_id, kind) VALUES (?, ?, ?)",
-        (&edge.source_id, &edge.target_id, &edge.kind),
     )?;
+    stmt.execute((&edge.source_id, &edge.target_id, &edge.kind))?;
     Ok(())
 }
 
@@ -506,11 +508,11 @@ pub fn search_nodes_fts(conn: &Connection, query_str: &str) -> rusqlite::Result<
 
 /// Insert a raw call into the raw_calls table.
 pub fn insert_raw_call(conn: &Connection, r: &RawCall) -> rusqlite::Result<()> {
-    conn.execute(
+    let mut stmt = conn.prepare_cached(
         "INSERT INTO raw_calls (caller_id, callee_name, line, column)
          VALUES (?, ?, ?, ?)",
-        (&r.caller_id, &r.callee_name, r.line, r.column),
     )?;
+    stmt.execute((&r.caller_id, &r.callee_name, r.line, r.column))?;
     Ok(())
 }
 

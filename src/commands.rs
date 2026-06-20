@@ -1,13 +1,29 @@
 use crate::db;
 use crate::parser;
+use rayon::prelude::*;
 use rusqlite::Connection;
 use serde_json::json;
 use std::collections::hash_map::DefaultHasher;
+use std::collections::HashMap;
 use std::error::Error;
 use std::fs;
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use tracing::{debug, error, info, warn};
+
+/// A source file that was read and parsed off the DB thread. Parsing is the
+/// CPU-bound part of indexing and is independent per file, so it runs in
+/// parallel; the resulting nodes/calls are written to the single SQLite
+/// transaction serially afterwards.
+struct ParsedFile {
+    relative_path: String,
+    language: &'static str,
+    content_hash: String,
+    size_bytes: i64,
+    last_modified: i64,
+    nodes: Vec<db::Node>,
+    calls: Vec<db::RawCall>,
+}
 
 /// Recursively scans `current_dir` for supported source files.
 /// Relative paths are calculated with respect to `base_dir`.
@@ -57,16 +73,6 @@ fn calculate_hash(content: &str) -> String {
     let mut s = DefaultHasher::new();
     content.hash(&mut s);
     format!("{:x}", s.finish())
-}
-
-/// Returns true if a node with the given id already exists in the database.
-fn node_exists(conn: &Connection, node_id: &str) -> Result<bool, rusqlite::Error> {
-    let count: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM nodes WHERE id = ?",
-        [node_id],
-        |row| row.get(0),
-    )?;
-    Ok(count > 0)
 }
 
 #[allow(clippy::type_complexity)]
@@ -140,6 +146,13 @@ pub fn run_init(workspace: &Path) -> Result<(), Box<dyn Error>> {
 
     let db_path = ochna_dir.join("ochna.db");
     let mut conn = Connection::open(&db_path)?;
+    // Bulk-load tuning. The index is fully derived from source and rebuilt by a
+    // single transaction here, so durability can be relaxed for a large I/O win;
+    // a crash mid-build just means re-running `init`.
+    conn.pragma_update(None, "journal_mode", "MEMORY")?;
+    conn.pragma_update(None, "synchronous", "OFF")?;
+    conn.pragma_update(None, "temp_store", "MEMORY")?;
+    conn.pragma_update(None, "cache_size", -262_144)?; // ~256 MB page cache
     db::init_schema(&conn)?;
 
     let tx = conn.transaction()?;
@@ -163,73 +176,111 @@ pub fn run_init(workspace: &Path) -> Result<(), Box<dyn Error>> {
 
     info!("Found {} source files to index.", files.len());
 
-    for file_path in files {
-        let absolute_path = workspace.join(&file_path);
-        let metadata = fs::metadata(&absolute_path)?;
-        let size_bytes = metadata.len() as i64;
-        let last_modified = metadata
-            .modified()
-            .ok()
-            .and_then(|t| t.duration_since(std::time::SystemTime::UNIX_EPOCH).ok())
-            .map(|d| d.as_secs() as i64)
-            .unwrap_or(0);
+    // Snapshot existing file metadata once so the modified-check is an in-memory
+    // lookup, leaving the parallel phase free of any DB access.
+    let existing_meta: HashMap<String, db::FileMetadata> = {
+        let mut stmt = tx.prepare(
+            "SELECT file_path, content_hash, language, size_bytes, last_modified FROM files",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                db::FileMetadata {
+                    file_path: row.get(0)?,
+                    content_hash: row.get(1)?,
+                    language: row.get(2)?,
+                    size_bytes: row.get(3)?,
+                    last_modified: row.get(4)?,
+                },
+            ))
+        })?;
+        rows.collect::<Result<_, _>>()?
+    };
 
-        let content = match fs::read_to_string(&absolute_path) {
-            Ok(c) => c,
-            Err(e) => {
-                warn!("Could not read file {}: {}", file_path.display(), e);
-                continue;
-            }
-        };
+    // Read + hash + parse modified files across all cores. Unchanged,
+    // unreadable, or unsupported files are filtered out here. A dedicated pool
+    // gives workers a large stack: AST traversal recurses with source nesting
+    // depth and the default worker stack overflows on deeply-nested files.
+    let pool = rayon::ThreadPoolBuilder::new()
+        .stack_size(64 * 1024 * 1024)
+        .build()?;
+    let parsed: Vec<ParsedFile> = pool.install(|| {
+        files
+            .par_iter()
+            .filter_map(|file_path| {
+                let absolute_path = workspace.join(file_path);
+                let metadata = fs::metadata(&absolute_path).ok()?;
+                let size_bytes = metadata.len() as i64;
+                let last_modified = metadata
+                    .modified()
+                    .ok()
+                    .and_then(|t| t.duration_since(std::time::SystemTime::UNIX_EPOCH).ok())
+                    .map(|d| d.as_secs() as i64)
+                    .unwrap_or(0);
+                let relative_path_str = file_path.to_string_lossy().to_string();
 
-        let current_hash = calculate_hash(&content);
-        let relative_path_str = file_path.to_string_lossy().to_string();
-
-        let existing = db::get_file_metadata(&tx, &relative_path_str)?;
-
-        let is_modified = match existing {
-            None => true,
-            Some(meta) => {
-                meta.content_hash != current_hash
-                    || meta.last_modified != Some(last_modified)
-                    || meta.size_bytes != Some(size_bytes)
-            }
-        };
-
-        if is_modified {
-            debug!("Indexing: {}", relative_path_str);
-            db::delete_file_data(&tx, &relative_path_str)?;
-
-            let language = if let Some(language) = language_for_path(&absolute_path) {
-                language
-            } else {
-                continue;
-            };
-
-            match parser::parse_code(&relative_path_str, &content, language) {
-                Ok((nodes, calls)) => {
-                    for node in &nodes {
-                        db::upsert_node(&tx, node)?;
+                let content = match fs::read_to_string(&absolute_path) {
+                    Ok(c) => c,
+                    Err(e) => {
+                        warn!("Could not read file {}: {}", file_path.display(), e);
+                        return None;
                     }
-                    for call in &calls {
-                        db::insert_raw_call(&tx, call)?;
+                };
+                let current_hash = calculate_hash(&content);
+
+                let is_modified = match existing_meta.get(&relative_path_str) {
+                    None => true,
+                    Some(meta) => {
+                        meta.content_hash != current_hash
+                            || meta.last_modified != Some(last_modified)
+                            || meta.size_bytes != Some(size_bytes)
                     }
-                    let file_meta = db::FileMetadata {
-                        file_path: relative_path_str,
+                };
+                if !is_modified {
+                    debug!("Up to date: {}", relative_path_str);
+                    return None;
+                }
+
+                let language = language_for_path(&absolute_path)?;
+                match parser::parse_code(&relative_path_str, &content, language) {
+                    Ok((nodes, calls)) => Some(ParsedFile {
+                        relative_path: relative_path_str,
+                        language,
                         content_hash: current_hash,
-                        language: Some(language.to_string()),
-                        size_bytes: Some(size_bytes),
-                        last_modified: Some(last_modified),
-                    };
-                    db::upsert_file_metadata(&tx, &file_meta)?;
+                        size_bytes,
+                        last_modified,
+                        nodes,
+                        calls,
+                    }),
+                    Err(e) => {
+                        error!("Error parsing {}: {}", relative_path_str, e);
+                        None
+                    }
                 }
-                Err(e) => {
-                    error!("Error parsing {}: {}", relative_path_str, e);
-                }
-            }
-        } else {
-            debug!("Up to date: {}", relative_path_str);
+            })
+            .collect()
+    });
+
+    // Write parsed results into the single transaction serially.
+    for pf in &parsed {
+        debug!("Indexing: {}", pf.relative_path);
+        db::delete_file_data(&tx, &pf.relative_path)?;
+        for node in &pf.nodes {
+            db::upsert_node(&tx, node)?;
         }
+        for call in &pf.calls {
+            db::insert_raw_call(&tx, call)?;
+        }
+        db::upsert_file_metadata(
+            &tx,
+            &db::FileMetadata {
+                file_path: pf.relative_path.clone(),
+                content_hash: pf.content_hash.clone(),
+                language: Some(pf.language.to_string()),
+                size_bytes: Some(pf.size_bytes),
+                last_modified: Some(pf.last_modified),
+            },
+        )?;
     }
 
     // Clear old resolved edges and unresolved references
@@ -239,7 +290,6 @@ pub fn run_init(workspace: &Path) -> Result<(), Box<dyn Error>> {
     // Load all raw calls currently in the database to re-resolve them globally
     let all_calls = db::get_all_raw_calls(&tx)?;
 
-    use std::collections::HashMap;
     let mut name_to_ids: HashMap<String, Vec<String>> = HashMap::new();
     let mut id_to_file: HashMap<String, String> = HashMap::new();
     {
@@ -257,9 +307,11 @@ pub fn run_init(workspace: &Path) -> Result<(), Box<dyn Error>> {
     let (edges, unresolved) = parser::resolve_calls_global(&all_calls, &name_to_ids, &id_to_file);
     let edge_count = edges.len();
 
-    // Edges reference existing nodes by construction, but guard against races/FK anyway.
+    // Edges reference existing nodes by construction; verify against the
+    // in-memory id set rather than a SQL point query per endpoint (millions of
+    // lookups on large repos).
     for edge in edges {
-        if node_exists(&tx, &edge.source_id)? && node_exists(&tx, &edge.target_id)? {
+        if id_to_file.contains_key(&edge.source_id) && id_to_file.contains_key(&edge.target_id) {
             db::upsert_edge(&tx, &edge)?;
         }
     }
