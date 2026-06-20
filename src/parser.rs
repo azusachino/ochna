@@ -5,22 +5,123 @@ use std::error::Error;
 use tree_sitter::Parser;
 
 pub type SymbolIx = u32;
+pub type InternedString = u32;
 pub type CandidateList = SmallVec<[SymbolIx; 4]>;
-pub type CandidateByFile = FxHashMap<String, CandidateList>;
+pub type CandidateByFile = FxHashMap<InternedString, CandidateList>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SymbolCandidate {
-    pub id: String,
-    pub file_path: String,
-    pub namespace: Option<String>,
+    pub id: InternedString,
+    pub file_path: InternedString,
+    pub namespace: Option<InternedString>,
+}
+
+#[derive(Debug, Default)]
+pub struct SymbolIndex {
+    pub symbols: Vec<SymbolCandidate>,
+    pub strings: Vec<String>,
+    pub by_name: FxHashMap<String, CandidateList>,
+    pub by_name_file: FxHashMap<String, CandidateByFile>,
+    pub by_id: FxHashMap<String, SymbolIx>,
+}
+
+#[derive(Debug, Default)]
+pub struct SymbolIndexBuilder {
+    symbols: Vec<SymbolCandidate>,
+    by_name: FxHashMap<String, CandidateList>,
+    by_name_file: FxHashMap<String, CandidateByFile>,
+    by_id: FxHashMap<String, SymbolIx>,
+    interner: StringInterner,
+}
+
+impl SymbolIndexBuilder {
+    pub fn push(
+        &mut self,
+        id: &str,
+        name: &str,
+        file_path: &str,
+        qualified_name: Option<&str>,
+    ) -> SymbolIx {
+        let ix = self.symbols.len() as SymbolIx;
+        let id_ix = self.interner.intern(id);
+        let file_path_ix = self.interner.intern(file_path);
+        let namespace_ix = qualified_name
+            .and_then(parent_namespace)
+            .map(|namespace| self.interner.intern(namespace));
+
+        self.symbols
+            .push(SymbolCandidate::new(id_ix, file_path_ix, namespace_ix));
+        self.by_name.entry(name.to_string()).or_default().push(ix);
+        self.by_name_file
+            .entry(name.to_string())
+            .or_default()
+            .entry(file_path_ix)
+            .or_default()
+            .push(ix);
+        self.by_id.insert(id.to_string(), ix);
+        ix
+    }
+
+    pub fn finish(self) -> SymbolIndex {
+        SymbolIndex {
+            symbols: self.symbols,
+            strings: self.interner.into_strings(),
+            by_name: self.by_name,
+            by_name_file: self.by_name_file,
+            by_id: self.by_id,
+        }
+    }
+}
+
+impl SymbolIndex {
+    pub fn from_nodes(nodes: &[Node]) -> Self {
+        let mut builder = SymbolIndexBuilder::default();
+        for node in nodes {
+            builder.push(
+                &node.id,
+                &node.name,
+                &node.file_path,
+                node.qualified_name.as_deref(),
+            );
+        }
+        builder.finish()
+    }
+}
+
+#[derive(Debug, Default)]
+pub struct StringInterner {
+    strings: Vec<String>,
+    by_value: FxHashMap<String, InternedString>,
+}
+
+impl StringInterner {
+    pub fn intern(&mut self, value: &str) -> InternedString {
+        if let Some(ix) = self.by_value.get(value) {
+            return *ix;
+        }
+
+        let ix = self.strings.len() as InternedString;
+        let value = value.to_string();
+        self.strings.push(value.clone());
+        self.by_value.insert(value, ix);
+        ix
+    }
+
+    pub fn resolve(&self, ix: InternedString) -> &str {
+        &self.strings[ix as usize]
+    }
+
+    pub fn into_strings(self) -> Vec<String> {
+        self.strings
+    }
 }
 
 impl SymbolCandidate {
-    pub fn new(id: String, file_path: String, qualified_name: Option<String>) -> Self {
-        let namespace = qualified_name
-            .as_deref()
-            .and_then(parent_namespace)
-            .map(str::to_string);
+    pub fn new(
+        id: InternedString,
+        file_path: InternedString,
+        namespace: Option<InternedString>,
+    ) -> Self {
         Self {
             id,
             file_path,
@@ -143,10 +244,7 @@ pub fn parse_code(
 /// - `by_id` maps a node id to its candidate index.
 pub fn resolve_calls_global(
     calls: &[RawCall],
-    symbols: &[SymbolCandidate],
-    by_name: &FxHashMap<String, CandidateList>,
-    by_name_file: &FxHashMap<String, CandidateByFile>,
-    by_id: &FxHashMap<String, SymbolIx>,
+    index: &SymbolIndex,
 ) -> (Vec<Edge>, Vec<UnresolvedRef>) {
     let mut edges = Vec::new();
     let mut unresolved = Vec::new();
@@ -154,7 +252,7 @@ pub fn resolve_calls_global(
     for call in calls {
         let (call_namespace, simple_name) = call_namespace_and_simple_name(&call.callee_name);
 
-        let candidates = match by_name.get(simple_name) {
+        let candidates = match index.by_name.get(simple_name) {
             Some(indices) if !indices.is_empty() => indices,
             _ => {
                 unresolved.push(UnresolvedRef {
@@ -170,11 +268,13 @@ pub fn resolve_calls_global(
         };
 
         // Prefer a target defined in the caller's own file, else consider all matches.
-        let caller = by_id
+        let caller = index
+            .by_id
             .get(&call.caller_id)
-            .and_then(|ix| symbols.get(*ix as usize));
+            .and_then(|ix| index.symbols.get(*ix as usize));
         let same_file = caller.and_then(|caller| {
-            by_name_file
+            index
+                .by_name_file
                 .get(simple_name)
                 .and_then(|by_file| by_file.get(&caller.file_path))
         });
@@ -185,12 +285,22 @@ pub fn resolve_calls_global(
         };
 
         let target_id = if working_set.len() == 1 {
-            symbols[working_set[0] as usize].id.clone()
+            index.strings[index.symbols[working_set[0] as usize].id as usize].clone()
         } else {
-            let caller_namespace = caller.and_then(|symbol| symbol.namespace.as_deref());
-            let target_ix = disambiguate(working_set, symbols, call_namespace, caller_namespace)
-                .unwrap_or(working_set[0]);
-            symbols[target_ix as usize].id.clone()
+            let caller_namespace = caller.and_then(|symbol| {
+                symbol
+                    .namespace
+                    .map(|namespace| index.strings[namespace as usize].as_str())
+            });
+            let target_ix = disambiguate(
+                working_set,
+                &index.symbols,
+                &index.strings,
+                call_namespace,
+                caller_namespace,
+            )
+            .unwrap_or(working_set[0]);
+            index.strings[index.symbols[target_ix as usize].id as usize].clone()
         };
 
         edges.push(Edge {
@@ -216,6 +326,7 @@ pub fn resolve_calls_global(
 fn disambiguate(
     candidates: &[SymbolIx],
     symbols: &[SymbolCandidate],
+    interned_strings: &[String],
     call_namespace: Option<&str>,
     caller_namespace: Option<&str>,
 ) -> Option<SymbolIx> {
@@ -224,8 +335,10 @@ fn disambiguate(
         if let Some(candidate) = candidates.iter().copied().find(|ix| {
             symbols
                 .get(*ix as usize)
-                .and_then(|symbol| symbol.namespace.as_deref())
-                == Some(namespace)
+                .and_then(|symbol| symbol.namespace)
+                .is_some_and(|candidate_namespace| {
+                    interned_strings[candidate_namespace as usize] == namespace
+                })
         }) {
             return Some(candidate);
         }
@@ -236,8 +349,10 @@ fn disambiguate(
         if let Some(candidate) = candidates.iter().copied().find(|ix| {
             symbols
                 .get(*ix as usize)
-                .and_then(|symbol| symbol.namespace.as_deref())
-                == Some(namespace)
+                .and_then(|symbol| symbol.namespace)
+                .is_some_and(|candidate_namespace| {
+                    interned_strings[candidate_namespace as usize] == namespace
+                })
         }) {
             return Some(candidate);
         }
@@ -257,27 +372,8 @@ fn call_namespace_and_simple_name(callee_name: &str) -> (Option<&str>, &str) {
 /// Resolve call sites against only the given `nodes` (single-file scope). A thin
 /// wrapper over [`resolve_calls_global`] used in tests and isolated parsing.
 pub fn resolve_calls_local(nodes: &[Node], calls: &[RawCall]) -> Vec<Edge> {
-    let mut symbols = Vec::with_capacity(nodes.len());
-    let mut by_name: FxHashMap<String, CandidateList> = FxHashMap::default();
-    let mut by_name_file: FxHashMap<String, CandidateByFile> = FxHashMap::default();
-    let mut by_id: FxHashMap<String, SymbolIx> = FxHashMap::default();
-    for n in nodes {
-        let ix = symbols.len() as SymbolIx;
-        symbols.push(SymbolCandidate::new(
-            n.id.clone(),
-            n.file_path.clone(),
-            n.qualified_name.clone(),
-        ));
-        by_name.entry(n.name.clone()).or_default().push(ix);
-        by_name_file
-            .entry(n.name.clone())
-            .or_default()
-            .entry(n.file_path.clone())
-            .or_default()
-            .push(ix);
-        by_id.insert(n.id.clone(), ix);
-    }
-    resolve_calls_global(calls, &symbols, &by_name, &by_name_file, &by_id).0
+    let index = SymbolIndex::from_nodes(nodes);
+    resolve_calls_global(calls, &index).0
 }
 
 /// Recursively traverses a Rust AST.
@@ -1510,6 +1606,53 @@ fn test_free_fn() {
         assert_eq!(edges.len(), 1);
         assert_eq!(edges[0].source_id, "src/shapes.rs::build");
         assert_eq!(edges[0].target_id, "src/shapes.rs::Line::new");
+    }
+
+    #[test]
+    fn test_symbol_index_interns_ids_paths_and_namespaces() {
+        let nodes = vec![
+            Node {
+                id: "src/shapes.rs::Point::new".to_string(),
+                name: "new".to_string(),
+                kind: "method".to_string(),
+                qualified_name: Some("Point::new".to_string()),
+                file_path: "src/shapes.rs".to_string(),
+                start_line: 1,
+                end_line: 1,
+                start_column: 0,
+                end_column: 0,
+                signature: None,
+                doc_comment: None,
+            },
+            Node {
+                id: "src/shapes.rs::Point::sum".to_string(),
+                name: "sum".to_string(),
+                kind: "method".to_string(),
+                qualified_name: Some("Point::sum".to_string()),
+                file_path: "src/shapes.rs".to_string(),
+                start_line: 2,
+                end_line: 2,
+                start_column: 0,
+                end_column: 0,
+                signature: None,
+                doc_comment: None,
+            },
+        ];
+
+        let index = SymbolIndex::from_nodes(&nodes);
+
+        assert_eq!(index.symbols.len(), 2);
+        assert_ne!(index.symbols[0].id, index.symbols[1].id);
+        assert_eq!(index.symbols[0].file_path, index.symbols[1].file_path);
+        assert_eq!(index.symbols[0].namespace, index.symbols[1].namespace);
+        assert_eq!(
+            index.strings[index.symbols[0].file_path as usize],
+            "src/shapes.rs"
+        );
+        assert_eq!(
+            index.strings[index.symbols[0].namespace.unwrap() as usize],
+            "Point"
+        );
     }
 
     #[test]

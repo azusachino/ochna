@@ -305,10 +305,7 @@ pub fn run_init(workspace: &Path) -> Result<(), Box<dyn Error>> {
     // Load all raw calls currently in the database to re-resolve them globally
     let all_calls = db::get_all_raw_calls(&tx)?;
 
-    let mut symbols = Vec::new();
-    let mut by_name: FxHashMap<String, parser::CandidateList> = FxHashMap::default();
-    let mut by_name_file: FxHashMap<String, parser::CandidateByFile> = FxHashMap::default();
-    let mut by_id: FxHashMap<String, parser::SymbolIx> = FxHashMap::default();
+    let mut symbol_index = parser::SymbolIndexBuilder::default();
     {
         let mut stmt = tx.prepare("SELECT id, name, file_path, qualified_name FROM nodes")?;
         let mut rows = stmt.query([])?;
@@ -317,32 +314,21 @@ pub fn run_init(workspace: &Path) -> Result<(), Box<dyn Error>> {
             let name: String = row.get(1)?;
             let file: String = row.get(2)?;
             let qualified_name: Option<String> = row.get(3)?;
-            let ix = symbols.len() as parser::SymbolIx;
-            symbols.push(parser::SymbolCandidate::new(
-                id.clone(),
-                file.clone(),
-                qualified_name,
-            ));
-            by_name.entry(name.clone()).or_default().push(ix);
-            by_name_file
-                .entry(name)
-                .or_default()
-                .entry(file)
-                .or_default()
-                .push(ix);
-            by_id.insert(id, ix);
+            symbol_index.push(&id, &name, &file, qualified_name.as_deref());
         }
     }
+    let symbol_index = symbol_index.finish();
 
-    let (edges, unresolved) =
-        parser::resolve_calls_global(&all_calls, &symbols, &by_name, &by_name_file, &by_id);
+    let (edges, unresolved) = parser::resolve_calls_global(&all_calls, &symbol_index);
     let edge_count = edges.len();
 
     // Edges reference existing nodes by construction; verify against the
     // in-memory id set rather than a SQL point query per endpoint (millions of
     // lookups on large repos).
     for edge in edges {
-        if by_id.contains_key(&edge.source_id) && by_id.contains_key(&edge.target_id) {
+        if symbol_index.by_id.contains_key(&edge.source_id)
+            && symbol_index.by_id.contains_key(&edge.target_id)
+        {
             db::upsert_edge(&tx, &edge)?;
         }
     }
