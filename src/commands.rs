@@ -1332,4 +1332,48 @@ mod tests {
 
         fs::remove_dir_all(&temp_workspace).unwrap();
     }
+
+    #[test]
+    fn test_incremental_sync_keeps_fts_triggers_after_fresh_rebuild() {
+        let temp_workspace = create_temp_dir();
+        let src_dir = temp_workspace.join("src");
+        fs::create_dir_all(&src_dir).unwrap();
+        let rust_file = src_dir.join("main.rs");
+        fs::write(
+            &rust_file,
+            "/// Mentions the original marker.\nfn searchable() {}\n",
+        )
+        .unwrap();
+
+        run_init(&temp_workspace).unwrap();
+
+        let db_path = temp_workspace.join(".ochna").join("ochna.db");
+        let conn = Connection::open(&db_path).unwrap();
+        assert_eq!(db::search_nodes_fts(&conn, "original").unwrap().len(), 1);
+
+        fs::write(
+            &rust_file,
+            "/// Mentions the replacement marker.\nfn searchable() {}\n",
+        )
+        .unwrap();
+        run_init(&temp_workspace).unwrap();
+
+        assert_eq!(db::search_nodes_fts(&conn, "replacement").unwrap().len(), 1);
+        assert!(
+            db::search_nodes_fts(&conn, "original").unwrap().is_empty(),
+            "updated file should remove stale FTS content"
+        );
+
+        fs::remove_file(&rust_file).unwrap();
+        run_init(&temp_workspace).unwrap();
+
+        assert!(
+            db::search_nodes_fts(&conn, "replacement")
+                .unwrap()
+                .is_empty(),
+            "deleted file should remove FTS content"
+        );
+
+        fs::remove_dir_all(&temp_workspace).unwrap();
+    }
 }
