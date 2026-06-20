@@ -26,8 +26,8 @@ langs="tokio=Rust netty=Java kubernetes=Go linux=C zig=Zig"
   echo
   echo "Generated: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
   echo
-  echo "| Giant | Lang | Commit | Files | Nodes | Edges | Index (s) |"
-  echo "| --- | --- | --- | ---: | ---: | ---: | ---: |"
+  echo "| Giant | Lang | Commit | Files | Nodes | Edges | Index (s) | Re-sync (s) |"
+  echo "| --- | --- | --- | ---: | ---: | ---: | ---: | ---: |"
 } >"$out"
 
 for pair in $langs; do
@@ -47,9 +47,17 @@ for pair in $langs; do
     secs=$(( $(date +%s) - start ))
   fi
 
+  # No-op incremental re-sync: nothing changed on disk, so the selective
+  # re-resolution path should touch zero call sources. Contrasts the old
+  # always-global delete-all-edges + re-resolve-all-raw_calls behaviour.
+  resync="-"
+  start=$(date +%s)
+  (cd "$dir" && "$bin" sync >/dev/null 2>&1)
+  resync=$(( $(date +%s) - start ))
+
   json="$(cd "$dir" && "$bin" status --json)"
-  echo "$json" | jq -r --arg g "$giant" --arg l "$lang" --arg s "$secs" \
-    '"| \($g) | \($l) | \(.git.commit_sha[0:12]) | \(.files) | \(.nodes) | \(.edges) | \($s) |"' \
+  echo "$json" | jq -r --arg g "$giant" --arg l "$lang" --arg s "$secs" --arg r "$resync" \
+    '"| \($g) | \($l) | \(.git.commit_sha[0:12]) | \(.files) | \(.nodes) | \(.edges) | \($s) | \($r) |"' \
     >>"$out"
 done
 
