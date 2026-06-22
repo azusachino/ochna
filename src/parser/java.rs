@@ -178,8 +178,10 @@ pub(super) fn traverse_java<'a>(
                                         let combined_path =
                                             combine_paths(class_prefix, method_path);
                                         for http_method in &http_methods {
-                                            let route_id =
-                                                format!("route:{}:{}", http_method, combined_path);
+                                            let route_id = format!(
+                                                "{}::{}::route::{} {}",
+                                                file_path, qname, http_method, combined_path
+                                            );
                                             let route_name =
                                                 format!("{} {}", http_method, combined_path);
 
@@ -395,7 +397,7 @@ fn extract_request_methods(annotation_node: tree_sitter::Node, content: &str) ->
                 }
             }
             if methods.is_empty() {
-                vec!["GET".to_string()]
+                vec!["ANY".to_string()]
             } else {
                 methods
             }
@@ -432,5 +434,10 @@ fn combine_paths(prefix: &str, suffix: &str) -> String {
     if !s.starts_with('/') && !s.is_empty() {
         s = format!("/{}", s);
     }
-    format!("{}{}", p, s)
+    let path = format!("{}{}", p, s);
+    if path.is_empty() {
+        "/".to_string()
+    } else {
+        path
+    }
 }

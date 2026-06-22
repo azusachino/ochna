@@ -628,7 +628,9 @@ public class UserController {
 
         let route_get = nodes
             .iter()
-            .find(|n| n.id == "route:GET:/api/v2/users/{id}")
+            .find(|n| {
+                n.id == "src/UserController.java::UserController::getUser::route::GET /api/v2/users/{id}"
+            })
             .unwrap();
         assert_eq!(route_get.name, "GET /api/v2/users/{id}");
         assert_eq!(route_get.kind, "route");
@@ -639,19 +641,25 @@ public class UserController {
 
         let route_create1 = nodes
             .iter()
-            .find(|n| n.id == "route:POST:/api/v2/users")
+            .find(|n| {
+                n.id == "src/UserController.java::UserController::createUser::route::POST /api/v2/users"
+            })
             .unwrap();
         assert_eq!(route_create1.name, "POST /api/v2/users");
 
         let route_create2 = nodes
             .iter()
-            .find(|n| n.id == "route:POST:/api/v2/create")
+            .find(|n| {
+                n.id == "src/UserController.java::UserController::createUser::route::POST /api/v2/create"
+            })
             .unwrap();
         assert_eq!(route_create2.name, "POST /api/v2/create");
 
         let route_status = nodes
             .iter()
-            .find(|n| n.id == "route:POST:/api/v2/status")
+            .find(|n| {
+                n.id == "src/UserController.java::UserController::getStatus::route::POST /api/v2/status"
+            })
             .unwrap();
         assert_eq!(route_status.name, "POST /api/v2/status");
 
@@ -678,6 +686,69 @@ public class UserController {
             .find(|e| e.source_id == route_status.id)
             .unwrap();
         assert_eq!(edge_status.target_id, get_status.id);
+    }
+
+    #[test]
+    fn test_parse_spring_routes_keeps_duplicate_paths_distinct() {
+        let first = r#"
+@RestController
+@RequestMapping("/api")
+public class FirstController {
+    @RequestMapping("/status")
+    public String status() {
+        return "first";
+    }
+}
+"#;
+        let second = r#"
+@RestController
+@RequestMapping("/api")
+public class SecondController {
+    @RequestMapping("/status")
+    public String status() {
+        return "second";
+    }
+}
+"#;
+
+        let (mut nodes, mut calls) = parse_code("src/FirstController.java", first, "java").unwrap();
+        let (second_nodes, second_calls) =
+            parse_code("src/SecondController.java", second, "java").unwrap();
+        nodes.extend(second_nodes);
+        calls.extend(second_calls);
+
+        let first_route = nodes
+            .iter()
+            .find(|n| {
+                n.id == "src/FirstController.java::FirstController::status::route::ANY /api/status"
+            })
+            .unwrap();
+        let second_route = nodes
+            .iter()
+            .find(|n| {
+                n.id
+                    == "src/SecondController.java::SecondController::status::route::ANY /api/status"
+            })
+            .unwrap();
+        assert_ne!(first_route.id, second_route.id);
+        assert_eq!(first_route.name, "ANY /api/status");
+        assert_eq!(second_route.name, "ANY /api/status");
+
+        let edges = resolve_calls_local(&nodes, &calls);
+        let first_status = nodes
+            .iter()
+            .find(|n| n.id == "src/FirstController.java::FirstController::status")
+            .unwrap();
+        let second_status = nodes
+            .iter()
+            .find(|n| n.id == "src/SecondController.java::SecondController::status")
+            .unwrap();
+        assert!(edges
+            .iter()
+            .any(|e| e.source_id == first_route.id && e.target_id == first_status.id));
+        assert!(edges
+            .iter()
+            .any(|e| e.source_id == second_route.id && e.target_id == second_status.id));
     }
 
     #[test]
