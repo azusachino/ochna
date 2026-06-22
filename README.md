@@ -39,12 +39,14 @@ Create a local database at `<workspace_root>/.ochna/ochna.db` and perform the in
 ```bash
 ochna init
 ```
+By default, generated/library directories such as `target`, `node_modules`, `.venv`, `vendor`, `build`, and `dist` are skipped. Use `ochna init --include-library` to index them.
 
 ### 2. Update/Sync Index
 Incrementally update the index after code changes (only modified files are re-parsed):
 ```bash
 ochna sync
 ```
+Use `ochna sync --include-library` if the index should include generated/library directories.
 
 ### 3. Check Statistics
 Display details about the indexed database and the Git commit baseline:
@@ -57,6 +59,7 @@ Search for symbols (names, comments, signatures) using full-text search:
 ```bash
 ochna search <query_term>
 ```
+Query commands accept global `--no-tests` to hide symbols classified from test paths.
 
 ### 5. Trace Callers
 Trace who invokes/calls a specific function or constructor across the project:

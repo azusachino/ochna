@@ -9,6 +9,15 @@ description: Use the ochna CLI to index, search, explore, and trace code call-gr
 
 Use `ochna` BEFORE resorting to standard tools like `rg` or `view_file`.
 
+**Framework routes**: Java Spring MVC controllers are indexed as `route` nodes.
+`@Controller` / `@RestController` classes combine class-level
+`@RequestMapping` paths with method-level `@GetMapping`, `@PostMapping`,
+`@PutMapping`, `@DeleteMapping`, `@PatchMapping`, and `@RequestMapping`
+annotations. Route nodes are named like `GET /api/users/{id}` or
+`ANY /api/status` and have call edges to their handler methods, so
+`ochna explore "/api"` or `ochna callers <handler>` can reveal HTTP entry
+points as graph nodes.
+
 **Machine-readable output**: every query command accepts a global `--json` flag that emits structured JSON on stdout (full node records with `id`, `qualified_name`, `signature`, line/column spans, plus callers/callees). Diagnostics and progress go to stderr, so `--json` stdout is always clean to parse. Prefer `--json` when consuming output programmatically. Verbosity is controlled by `RUST_LOG` (default `info`).
 
 ## Commands Reference
@@ -20,11 +29,13 @@ Use `ochna` BEFORE resorting to standard tools like `rg` or `view_file`.
   ochna init
   ```
   _Call this at the start of a project/session to create the SQLite index._
+  _By default this skips library/generated directories (`target`, `node_modules`, `.venv`, `vendor`, `build`, `dist`); pass `--include-library` to index them._
 - **Update/Sync Index**:
   ```bash
   ochna sync
   ```
   _Call this after editing files to incrementally sync code changes into the SQLite index._
+  _Use `ochna sync --include-library` when generated/library directories should stay in the index._
 - **Check Index Statistics**:
   ```bash
   ochna status
@@ -41,6 +52,7 @@ Use `ochna` BEFORE resorting to standard tools like `rg` or `view_file`.
   ochna search <query_keyword_or_name>
   ```
   _Performs FTS (Full-Text Search) and name matches. Returns matching symbols with their file paths and line numbers._
+  _Add global `--no-tests` to query commands (`search`, `callers`, `node`, `explore`) to hide symbols classified from test paths._
 - **Unified Exploration**:
   ```bash
   ochna explore <query>

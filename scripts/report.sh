@@ -19,7 +19,7 @@ bin="${OCHNA_BIN:-$repo_root/target/release/ochna}"
 out="${1:-BENCHMARK.md}"
 
 # giant -> language label
-langs="tokio=Rust netty=Java kubernetes=Go linux=C zig=Zig"
+langs="tokio=Rust netty=Java spring-petclinic=Spring kubernetes=Go linux=C zig=Zig"
 
 {
   echo "# Benchmark report"

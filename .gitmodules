@@ -20,3 +20,8 @@
 	url = https://codeberg.org/ziglang/zig.git
 	shallow = true
 	ignore = dirty
+[submodule "clones/spring-petclinic"]
+	path = clones/spring-petclinic
+	url = https://github.com/spring-projects/spring-petclinic.git
+	shallow = true
+	ignore = dirty
