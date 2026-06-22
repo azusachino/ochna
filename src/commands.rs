@@ -1330,8 +1330,8 @@ mod tests {
         let cross_file: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM edges e \
-                 JOIN nodes s ON e.source_id = s.id \
-                 JOIN nodes t ON e.target_id = t.id \
+                 JOIN nodes s ON e.source_nid = s.nid \
+                 JOIN nodes t ON e.target_nid = t.nid \
                  WHERE s.file_path <> t.file_path",
                 [],
                 |row| row.get(0),
@@ -1444,8 +1444,8 @@ mod tests {
         let moved_edge: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM edges
-                 WHERE source_id = 'src/a.rs::caller'
-                   AND target_id = 'src/c.rs::target'",
+                 WHERE source_nid = (SELECT nid FROM nodes WHERE id = 'src/a.rs::caller')
+                   AND target_nid = (SELECT nid FROM nodes WHERE id = 'src/c.rs::target')",
                 [],
                 |row| row.get(0),
             )
@@ -1458,8 +1458,8 @@ mod tests {
         let stale_edge: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM edges
-                 WHERE source_id = 'src/a.rs::caller'
-                   AND target_id = 'src/b.rs::target'",
+                 WHERE source_nid = (SELECT nid FROM nodes WHERE id = 'src/a.rs::caller')
+                   AND target_nid = (SELECT nid FROM nodes WHERE id = 'src/b.rs::target')",
                 [],
                 |row| row.get(0),
             )
@@ -1469,8 +1469,8 @@ mod tests {
         let preserved_edge: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM edges
-                 WHERE source_id = 'src/a.rs::caller'
-                   AND target_id = 'src/a.rs::local_keep'",
+                 WHERE source_nid = (SELECT nid FROM nodes WHERE id = 'src/a.rs::caller')
+                   AND target_nid = (SELECT nid FROM nodes WHERE id = 'src/a.rs::local_keep')",
                 [],
                 |row| row.get(0),
             )
@@ -1509,8 +1509,8 @@ mod tests {
         let resolved_edge: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM edges
-                 WHERE source_id = 'src/a.rs::caller'
-                   AND target_id = 'src/b.rs::missing'",
+                 WHERE source_nid = (SELECT nid FROM nodes WHERE id = 'src/a.rs::caller')
+                   AND target_nid = (SELECT nid FROM nodes WHERE id = 'src/b.rs::missing')",
                 [],
                 |row| row.get(0),
             )

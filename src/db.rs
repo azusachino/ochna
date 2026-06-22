@@ -80,6 +80,10 @@ fn split_callee_name(callee_name: &str) -> (Option<String>, String) {
     }
 }
 
+/// Current on-disk schema version. Bump when a change is not backward
+/// compatible; `init_schema` then drops the data tables and the caller rebuilds.
+const SCHEMA_VERSION: i64 = 2;
+
 /// Initialize the SQLite database schema.
 /// Enforces foreign key constraints and creates all necessary tables,
 /// indexes, the FTS5 virtual table, and the update/delete/insert triggers.
@@ -96,9 +100,35 @@ pub fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
         [],
     )?;
 
+    // Schema v2 interns node identity to an integer surrogate (`nid`) and stores
+    // it on edges/raw_calls/unresolved_refs instead of the long text `id`. The
+    // graph is fully re-derivable from source, so an older DB is migrated by
+    // dropping the data tables and letting the caller rebuild — no fragile
+    // in-place column rewrite. Children first, then the parent `nodes`.
+    let current_version: Option<i64> =
+        conn.query_row("SELECT MAX(version) FROM schema_versions", [], |row| {
+            row.get(0)
+        })?;
+    if matches!(current_version, Some(v) if v < SCHEMA_VERSION) {
+        for table in [
+            "edges",
+            "raw_calls",
+            "unresolved_refs",
+            "nodes_fts",
+            "nodes",
+        ] {
+            conn.execute(&format!("DROP TABLE IF EXISTS {table}"), [])?;
+        }
+        conn.execute("DELETE FROM schema_versions", [])?;
+    }
+
+    // `nid` aliases rowid (the compact surrogate referenced by every edge/call);
+    // `id` keeps the human-readable "file::symbol" key, UNIQUE so resolution and
+    // upserts can still look a node up by string.
     conn.execute(
         "CREATE TABLE IF NOT EXISTS nodes (
-            id TEXT PRIMARY KEY,
+            nid INTEGER PRIMARY KEY,
+            id TEXT NOT NULL UNIQUE,
             name TEXT NOT NULL,
             kind TEXT NOT NULL,
             qualified_name TEXT,
@@ -113,15 +143,17 @@ pub fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
         [],
     )?;
 
+    // WITHOUT ROWID folds the (source_nid, target_nid, kind) primary key into the
+    // table b-tree, so there is no separate PK autoindex duplicating the keys.
     conn.execute(
         "CREATE TABLE IF NOT EXISTS edges (
-            source_id TEXT NOT NULL,
-            target_id TEXT NOT NULL,
+            source_nid INTEGER NOT NULL,
+            target_nid INTEGER NOT NULL,
             kind TEXT NOT NULL,
-            PRIMARY KEY (source_id, target_id, kind),
-            FOREIGN KEY (source_id) REFERENCES nodes(id) ON DELETE CASCADE,
-            FOREIGN KEY (target_id) REFERENCES nodes(id) ON DELETE CASCADE
-         )",
+            PRIMARY KEY (source_nid, target_nid, kind),
+            FOREIGN KEY (source_nid) REFERENCES nodes(nid) ON DELETE CASCADE,
+            FOREIGN KEY (target_nid) REFERENCES nodes(nid) ON DELETE CASCADE
+         ) WITHOUT ROWID",
         [],
     )?;
 
@@ -139,32 +171,31 @@ pub fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
     conn.execute(
         "CREATE TABLE IF NOT EXISTS unresolved_refs (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            source_id TEXT NOT NULL,
+            source_nid INTEGER NOT NULL,
             specifier TEXT NOT NULL,
             kind TEXT NOT NULL,
             line INTEGER NOT NULL,
             column INTEGER NOT NULL,
-            FOREIGN KEY (source_id) REFERENCES nodes(id) ON DELETE CASCADE
+            FOREIGN KEY (source_nid) REFERENCES nodes(nid) ON DELETE CASCADE
          )",
         [],
     )?;
 
     conn.execute(
         "CREATE TABLE IF NOT EXISTS raw_calls (
-            caller_id TEXT NOT NULL,
+            caller_nid INTEGER NOT NULL,
             callee_name TEXT NOT NULL,
             callee_simple TEXT,
             callee_scope TEXT,
             line INTEGER NOT NULL,
             column INTEGER NOT NULL,
-            FOREIGN KEY (caller_id) REFERENCES nodes(id) ON DELETE CASCADE
+            FOREIGN KEY (caller_nid) REFERENCES nodes(nid) ON DELETE CASCADE
          )",
         [],
     )?;
-    migrate_raw_calls_schema(conn)?;
 
     conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_raw_calls_caller_id ON raw_calls(caller_id)",
+        "CREATE INDEX IF NOT EXISTS idx_raw_calls_caller_nid ON raw_calls(caller_nid)",
         [],
     )?;
     conn.execute(
@@ -208,21 +239,18 @@ pub fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
         "CREATE INDEX IF NOT EXISTS idx_nodes_kind ON nodes(kind);",
         [],
     )?;
-    // No index on edges(source_id): the PRIMARY KEY (source_id, target_id, kind)
-    // already serves source_id-prefixed lookups (find_callees, delete-by-source),
-    // so a dedicated index is pure duplication of the text IDs. Drop it from any
-    // pre-existing DB on the next init/sync.
-    conn.execute("DROP INDEX IF EXISTS idx_edges_source_id;", [])?;
-    // find_callers filters on target_id, which the PK can't serve — keep this one.
+    // No index on edges(source_nid): the PRIMARY KEY (source_nid, target_nid,
+    // kind) already serves source-prefixed lookups (find_callees, delete-by-
+    // source). find_callers filters on target_nid, which the PK can't serve, so
+    // this reverse index is the one we keep.
     conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_edges_target_id ON edges(target_id);",
+        "CREATE INDEX IF NOT EXISTS idx_edges_target_nid ON edges(target_nid);",
         [],
     )?;
 
-    // Record schema version (Version 1)
     conn.execute(
-        "INSERT OR IGNORE INTO schema_versions (version) VALUES (1)",
-        [],
+        "INSERT OR IGNORE INTO schema_versions (version) VALUES (?1)",
+        [SCHEMA_VERSION],
     )?;
 
     Ok(())
@@ -273,54 +301,6 @@ pub fn rebuild_node_fts(conn: &Connection) -> rusqlite::Result<()> {
     Ok(())
 }
 
-fn migrate_raw_calls_schema(conn: &Connection) -> rusqlite::Result<()> {
-    let mut stmt = conn.prepare("PRAGMA table_info(raw_calls)")?;
-    let columns = stmt
-        .query_map([], |row| row.get::<_, String>(1))?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-
-    if !columns.iter().any(|column| column == "callee_simple") {
-        conn.execute("ALTER TABLE raw_calls ADD COLUMN callee_simple TEXT", [])?;
-    }
-    if !columns.iter().any(|column| column == "callee_scope") {
-        conn.execute("ALTER TABLE raw_calls ADD COLUMN callee_scope TEXT", [])?;
-    }
-    // caller_file was a derived, never-queried column (and a redundant index on
-    // it). Shed both from any pre-existing DB. DROP COLUMN needs SQLite 3.35+;
-    // ignore failure so older engines simply keep an unused column.
-    conn.execute("DROP INDEX IF EXISTS idx_raw_calls_caller_file", [])?;
-    if columns.iter().any(|column| column == "caller_file") {
-        let _ = conn.execute("ALTER TABLE raw_calls DROP COLUMN caller_file", []);
-    }
-
-    let mut stmt = conn.prepare(
-        "SELECT rowid, caller_id, callee_name FROM raw_calls
-         WHERE callee_simple IS NULL",
-    )?;
-    let rows = stmt
-        .query_map([], |row| {
-            Ok((
-                row.get::<_, i64>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-            ))
-        })?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    drop(stmt);
-
-    for (rowid, caller_id, callee_name) in rows {
-        let call = RawCall::new(caller_id, callee_name, 0, 0);
-        conn.execute(
-            "UPDATE raw_calls
-             SET callee_simple = ?, callee_scope = ?
-             WHERE rowid = ?",
-            (&call.callee_simple, &call.callee_scope, rowid),
-        )?;
-    }
-
-    Ok(())
-}
-
 /// Helper mapping database Row back to a Node structure
 fn map_row_to_node(row: &rusqlite::Row) -> rusqlite::Result<Node> {
     Ok(Node {
@@ -367,8 +347,12 @@ pub fn upsert_node(conn: &Connection, node: &Node) -> rusqlite::Result<()> {
 
 /// Upsert an edge into the database (INSERT OR REPLACE)
 pub fn upsert_edge(conn: &Connection, edge: &Edge) -> rusqlite::Result<()> {
+    // Translate the string endpoints to their interned `nid` in SQL so callers
+    // keep working with "file::symbol" ids. If either endpoint is missing the
+    // SELECT yields no row and nothing is inserted (the edge has no valid node).
     let mut stmt = conn.prepare_cached(
-        "INSERT OR REPLACE INTO edges (source_id, target_id, kind) VALUES (?, ?, ?)",
+        "INSERT OR REPLACE INTO edges (source_nid, target_nid, kind)
+         SELECT s.nid, t.nid, ?3 FROM nodes s, nodes t WHERE s.id = ?1 AND t.id = ?2",
     )?;
     stmt.execute((&edge.source_id, &edge.target_id, &edge.kind))?;
     Ok(())
@@ -419,8 +403,11 @@ pub fn get_raw_call_source_ids_by_callee_simple(
     conn: &Connection,
     callee_simple: &str,
 ) -> rusqlite::Result<Vec<String>> {
-    let mut stmt =
-        conn.prepare("SELECT DISTINCT caller_id FROM raw_calls WHERE callee_simple = ?")?;
+    let mut stmt = conn.prepare(
+        "SELECT DISTINCT n.id FROM raw_calls r
+         JOIN nodes n ON n.nid = r.caller_nid
+         WHERE r.callee_simple = ?",
+    )?;
     let rows = stmt.query_map([callee_simple], |row| row.get(0))?;
     rows.collect()
 }
@@ -431,8 +418,9 @@ pub fn get_unresolved_source_ids_by_specifier_simple(
 ) -> rusqlite::Result<Vec<String>> {
     let like_pattern = format!("%::{}", specifier_simple);
     let mut stmt = conn.prepare(
-        "SELECT DISTINCT source_id, specifier FROM unresolved_refs
-         WHERE specifier = ? OR specifier LIKE ?",
+        "SELECT DISTINCT n.id, u.specifier FROM unresolved_refs u
+         JOIN nodes n ON n.nid = u.source_nid
+         WHERE u.specifier = ? OR u.specifier LIKE ?",
     )?;
     let rows = stmt.query_map([specifier_simple, &like_pattern], |row| {
         Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
@@ -454,16 +442,20 @@ pub fn get_raw_calls_for_source_id(
     source_id: &str,
 ) -> rusqlite::Result<Vec<RawCall>> {
     let mut stmt = conn.prepare(
-        "SELECT caller_id, callee_name, callee_simple, callee_scope, line, column
-         FROM raw_calls
-         WHERE caller_id = ?",
+        "SELECT n.id, r.callee_name, r.callee_simple, r.callee_scope, r.line, r.column
+         FROM raw_calls r
+         JOIN nodes n ON n.nid = r.caller_nid
+         WHERE n.id = ?",
     )?;
     let rows = stmt.query_map([source_id], map_row_to_raw_call)?;
     rows.collect()
 }
 
 pub fn delete_edges_for_source_id(conn: &Connection, source_id: &str) -> rusqlite::Result<()> {
-    conn.execute("DELETE FROM edges WHERE source_id = ?", [source_id])?;
+    conn.execute(
+        "DELETE FROM edges WHERE source_nid = (SELECT nid FROM nodes WHERE id = ?)",
+        [source_id],
+    )?;
     Ok(())
 }
 
@@ -472,7 +464,7 @@ pub fn delete_unresolved_refs_for_source_id(
     source_id: &str,
 ) -> rusqlite::Result<()> {
     conn.execute(
-        "DELETE FROM unresolved_refs WHERE source_id = ?",
+        "DELETE FROM unresolved_refs WHERE source_nid = (SELECT nid FROM nodes WHERE id = ?)",
         [source_id],
     )?;
     Ok(())
@@ -575,8 +567,8 @@ pub fn get_project_metadata(conn: &Connection, key: &str) -> rusqlite::Result<Op
 /// Insert an unresolved reference (a call whose target symbol is not indexed).
 pub fn insert_unresolved_ref(conn: &Connection, r: &UnresolvedRef) -> rusqlite::Result<()> {
     conn.execute(
-        "INSERT INTO unresolved_refs (source_id, specifier, kind, line, column)
-         VALUES (?, ?, ?, ?, ?)",
+        "INSERT INTO unresolved_refs (source_nid, specifier, kind, line, column)
+         SELECT nid, ?2, ?3, ?4, ?5 FROM nodes WHERE id = ?1",
         (&r.source_id, &r.specifier, &r.kind, r.line, r.column),
     )?;
     Ok(())
@@ -594,8 +586,8 @@ pub fn find_callers(
                     n.start_line, n.end_line, n.start_column, n.end_column, \
                     n.signature, n.doc_comment \
              FROM nodes n \
-             JOIN edges e ON n.id = e.source_id \
-             WHERE e.target_id = ? AND e.kind = ?",
+             JOIN edges e ON n.nid = e.source_nid \
+             WHERE e.target_nid = (SELECT nid FROM nodes WHERE id = ?) AND e.kind = ?",
         )?;
         let mut rows = stmt.query([target_id, kind])?;
         let mut nodes = Vec::new();
@@ -609,8 +601,8 @@ pub fn find_callers(
                     n.start_line, n.end_line, n.start_column, n.end_column, \
                     n.signature, n.doc_comment \
              FROM nodes n \
-             JOIN edges e ON n.id = e.source_id \
-             WHERE e.target_id = ?",
+             JOIN edges e ON n.nid = e.source_nid \
+             WHERE e.target_nid = (SELECT nid FROM nodes WHERE id = ?)",
         )?;
         let mut rows = stmt.query([target_id])?;
         let mut nodes = Vec::new();
@@ -633,8 +625,8 @@ pub fn find_callees(
                     n.start_line, n.end_line, n.start_column, n.end_column, \
                     n.signature, n.doc_comment \
              FROM nodes n \
-             JOIN edges e ON n.id = e.target_id \
-             WHERE e.source_id = ? AND e.kind = ?",
+             JOIN edges e ON n.nid = e.target_nid \
+             WHERE e.source_nid = (SELECT nid FROM nodes WHERE id = ?) AND e.kind = ?",
         )?;
         let mut rows = stmt.query([source_id, kind])?;
         let mut nodes = Vec::new();
@@ -648,8 +640,8 @@ pub fn find_callees(
                     n.start_line, n.end_line, n.start_column, n.end_column, \
                     n.signature, n.doc_comment \
              FROM nodes n \
-             JOIN edges e ON n.id = e.target_id \
-             WHERE e.source_id = ?",
+             JOIN edges e ON n.nid = e.target_nid \
+             WHERE e.source_nid = (SELECT nid FROM nodes WHERE id = ?)",
         )?;
         let mut rows = stmt.query([source_id])?;
         let mut nodes = Vec::new();
@@ -683,8 +675,8 @@ pub fn search_nodes_fts(conn: &Connection, query_str: &str) -> rusqlite::Result<
 pub fn insert_raw_call(conn: &Connection, r: &RawCall) -> rusqlite::Result<()> {
     let mut stmt = conn.prepare_cached(
         "INSERT INTO raw_calls (
-            caller_id, callee_name, callee_simple, callee_scope, line, column
-         ) VALUES (?, ?, ?, ?, ?, ?)",
+            caller_nid, callee_name, callee_simple, callee_scope, line, column
+         ) SELECT nid, ?2, ?3, ?4, ?5, ?6 FROM nodes WHERE id = ?1",
     )?;
     stmt.execute((
         &r.caller_id,
@@ -700,8 +692,9 @@ pub fn insert_raw_call(conn: &Connection, r: &RawCall) -> rusqlite::Result<()> {
 /// Retrieve all raw calls from the database.
 pub fn get_all_raw_calls(conn: &Connection) -> rusqlite::Result<Vec<RawCall>> {
     let mut stmt = conn.prepare(
-        "SELECT caller_id, callee_name, callee_simple, callee_scope, line, column
-         FROM raw_calls",
+        "SELECT n.id, r.callee_name, r.callee_simple, r.callee_scope, r.line, r.column
+         FROM raw_calls r
+         JOIN nodes n ON n.nid = r.caller_nid",
     )?;
     let rows = stmt.query_map([], map_row_to_raw_call)?;
     let mut calls = Vec::new();
