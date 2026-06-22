@@ -99,8 +99,15 @@ For custom queries or advanced analytics directly from the SQLite database:
   ```
   _This runs under Python 3.14 and directly extracts file distributions, symbol counts, and hot call sites using `sqlite3` without invoking the binary._
 
+- **Explain a GitHub PR against an indexed checkout**:
+  ```bash
+  uv run python pyscripts/pr_feature_report.py --workspace clones/kubernetes --repo kubernetes/kubernetes --pr 139848
+  ```
+  _Use this for large benchmark submodules where local history may be shallow. It reads PR metadata and changed files with `gh api`, then reads symbols from the local `.ochna/ochna.db`._
+
 ## Workflow Integration Rules
 
 1.  **Graph First**: For any task, run `ochna explore <keyword>` first to map out the relevant implementation files.
 2.  **No Blind Grepping**: Do not run recursive greps (`rg`) for symbol lookups. Run `ochna search <name>` or `ochna callers <name>` instead.
 3.  **Read Replacements**: Use `ochna node --file <path>` instead of `view_file` to read source files; it returns line numbers and attaches dependents.
+4.  **Large PR Archaeology**: For Linux/Kubernetes-style corpora, do not assume local merge parents exist. First verify the index with `ochna status --json`, use `gh api` for PR metadata and changed files, then use `ochna node --file ... --symbols-only --json` and `ochna node --symbol ... --include-code --json` for the changed symbols. Treat common Go method callees such as `GetList`, `Run`, `Add`, and `Stop` as noisy unless they are anchored to the changed file or exact production symbol.
