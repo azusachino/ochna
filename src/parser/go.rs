@@ -55,6 +55,7 @@ pub(super) fn traverse_go<'a>(
                             end_column: end_point.column as i64,
                             signature: Some(sig),
                             doc_comment: doc,
+                            is_test: false,
                         });
                     }
                 }
@@ -87,6 +88,7 @@ pub(super) fn traverse_go<'a>(
                     end_column: end_point.column as i64,
                     signature: Some(sig),
                     doc_comment: doc,
+                    is_test: false,
                 });
 
                 id_holder = id;
@@ -138,6 +140,7 @@ pub(super) fn traverse_go<'a>(
                     end_column: end_point.column as i64,
                     signature: Some(sig),
                     doc_comment: doc,
+                    is_test: false,
                 });
 
                 id_holder = id;

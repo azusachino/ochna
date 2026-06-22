@@ -62,6 +62,7 @@ pub(super) fn traverse_java<'a>(
                     end_column: end_point.column as i64,
                     signature: Some(sig),
                     doc_comment: doc,
+                    is_test: false,
                 });
 
                 qname_holder = qname;
@@ -107,6 +108,7 @@ pub(super) fn traverse_java<'a>(
                     end_column: end_point.column as i64,
                     signature: Some(sig),
                     doc_comment: doc,
+                    is_test: false,
                 });
 
                 id_holder = id;

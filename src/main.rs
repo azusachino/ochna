@@ -14,14 +14,25 @@ struct Cli {
     /// Emit machine-readable JSON results on stdout instead of human text
     #[arg(long, global = true)]
     json: bool,
+    /// Exclude symbols classified as test code from query results
+    #[arg(long = "no-tests", global = true)]
+    no_tests: bool,
 }
 
 #[derive(Subcommand, Debug)]
 enum Commands {
     /// Initialize the code graph database and scan the project
-    Init,
+    Init {
+        /// Include vendored/build/library directories such as target, node_modules, .venv, vendor, build, and dist
+        #[arg(long = "include-library")]
+        include_library: bool,
+    },
     /// Sync the code graph database with incremental updates for modified files
-    Sync,
+    Sync {
+        /// Include vendored/build/library directories such as target, node_modules, .venv, vendor, build, and dist
+        #[arg(long = "include-library")]
+        include_library: bool,
+    },
     /// Display index statistics
     Status,
     /// List indexed files with metadata
@@ -85,17 +96,18 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let current_dir = std::env::current_dir()?;
     let json = cli.json;
+    let no_tests = cli.no_tests;
 
     match cli.command {
-        Commands::Init => {
-            commands::run_init(&current_dir)?;
+        Commands::Init { include_library } => {
+            commands::run_init(&current_dir, include_library)?;
         }
-        Commands::Sync => {
+        Commands::Sync { include_library } => {
             let ochna_dir = current_dir.join(".ochna");
             if !ochna_dir.exists() {
                 return Err("Database not initialized. Please run 'ochna init' first.".into());
             }
-            commands::run_init(&current_dir)?;
+            commands::run_init(&current_dir, include_library)?;
         }
         Commands::Status => {
             commands::run_status(&current_dir, json)?;
@@ -104,10 +116,10 @@ fn main() -> Result<(), Box<dyn Error>> {
             commands::run_files(&current_dir, json)?;
         }
         Commands::Search { query } => {
-            commands::run_search(&current_dir, &query, json)?;
+            commands::run_search(&current_dir, &query, json, no_tests)?;
         }
         Commands::Callers { symbol } => {
-            commands::run_callers(&current_dir, &symbol, json)?;
+            commands::run_callers(&current_dir, &symbol, json, no_tests)?;
         }
         Commands::Node {
             file,
@@ -128,10 +140,11 @@ fn main() -> Result<(), Box<dyn Error>> {
                 include_code,
                 line,
                 json,
+                no_tests,
             )?;
         }
         Commands::Explore { query } => {
-            commands::run_explore(&current_dir, &query, json)?;
+            commands::run_explore(&current_dir, &query, json, no_tests)?;
         }
     }
 

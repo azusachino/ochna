@@ -162,6 +162,7 @@ pub(super) fn push_symbol(
         end_column: end_point.column as i64,
         signature: Some(get_signature(node, content)),
         doc_comment: get_doc_comment(node, content),
+        is_test: false,
     });
 }
 

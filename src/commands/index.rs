@@ -22,13 +22,19 @@ struct ParsedFile {
     content_hash: String,
     size_bytes: i64,
     last_modified: i64,
+    is_test: bool,
     nodes: Vec<db::Node>,
     calls: Vec<db::RawCall>,
 }
 
 /// Recursively scans `current_dir` for supported source files.
 /// Relative paths are calculated with respect to `base_dir`.
-fn scan_dir(base_dir: &Path, current_dir: &Path, files: &mut Vec<PathBuf>) -> std::io::Result<()> {
+fn scan_dir(
+    base_dir: &Path,
+    current_dir: &Path,
+    files: &mut Vec<PathBuf>,
+    include_library: bool,
+) -> std::io::Result<()> {
     if current_dir.is_dir() {
         for entry in fs::read_dir(current_dir)? {
             let entry = entry?;
@@ -36,14 +42,10 @@ fn scan_dir(base_dir: &Path, current_dir: &Path, files: &mut Vec<PathBuf>) -> st
             let file_name = path.file_name().unwrap_or_default().to_string_lossy();
 
             if path.is_dir() {
-                // Ignore dotfiles, target directory, node_modules, etc.
-                if file_name.starts_with('.')
-                    || file_name == "target"
-                    || file_name == "node_modules"
-                {
+                if should_skip_dir(&file_name, include_library) {
                     continue;
                 }
-                scan_dir(base_dir, &path, files)?;
+                scan_dir(base_dir, &path, files, include_library)?;
             } else if path.is_file() && language_for_path(&path).is_some() {
                 if let Ok(rel_path) = path.strip_prefix(base_dir) {
                     files.push(rel_path.to_path_buf());
@@ -52,6 +54,34 @@ fn scan_dir(base_dir: &Path, current_dir: &Path, files: &mut Vec<PathBuf>) -> st
         }
     }
     Ok(())
+}
+
+fn should_skip_dir(file_name: &str, include_library: bool) -> bool {
+    if file_name == ".git" || file_name == ".ochna" {
+        return true;
+    }
+    if !include_library
+        && matches!(
+            file_name,
+            "target" | "node_modules" | ".venv" | "vendor" | "build" | "dist"
+        )
+    {
+        return true;
+    }
+    file_name.starts_with('.') && !(include_library && file_name == ".venv")
+}
+
+fn is_test_path(path: &Path) -> bool {
+    let path_str = path.to_string_lossy().replace('\\', "/");
+    if path_str.ends_with("_test.go") {
+        return true;
+    }
+
+    let segments: Vec<&str> = path_str.split('/').collect();
+    if segments.contains(&"tests") {
+        return true;
+    }
+    segments.windows(2).any(|pair| pair == ["src", "test"])
 }
 
 fn language_for_path(path: &Path) -> Option<&'static str> {
@@ -139,7 +169,7 @@ fn get_git_info(
 /// - Recursively scans for supported source files.
 /// - Computes hashes, and updates database for new/modified files.
 /// - Resolves call edges across files and records unmatched calls as unresolved refs.
-pub fn run_init(workspace: &Path) -> Result<(), Box<dyn Error>> {
+pub fn run_init(workspace: &Path, include_library: bool) -> Result<(), Box<dyn Error>> {
     let ochna_dir = workspace.join(".ochna");
     if !ochna_dir.exists() {
         fs::create_dir_all(&ochna_dir)?;
@@ -171,7 +201,7 @@ pub fn run_init(workspace: &Path) -> Result<(), Box<dyn Error>> {
     }
 
     let mut files = Vec::new();
-    scan_dir(workspace, workspace, &mut files)?;
+    scan_dir(workspace, workspace, &mut files, include_library)?;
 
     let mut affected_source_ids: FxHashSet<String> = FxHashSet::default();
     let mut changed_symbol_names: FxHashSet<String> = FxHashSet::default();
@@ -203,7 +233,7 @@ pub fn run_init(workspace: &Path) -> Result<(), Box<dyn Error>> {
     // lookup, leaving the parallel phase free of any DB access.
     let existing_meta: FxHashMap<String, db::FileMetadata> = {
         let mut stmt = tx.prepare(
-            "SELECT file_path, content_hash, language, size_bytes, last_modified FROM files",
+            "SELECT file_path, content_hash, language, size_bytes, last_modified, is_test FROM files",
         )?;
         let rows = stmt.query_map([], |row| {
             Ok((
@@ -214,6 +244,7 @@ pub fn run_init(workspace: &Path) -> Result<(), Box<dyn Error>> {
                     language: row.get(2)?,
                     size_bytes: row.get(3)?,
                     last_modified: row.get(4)?,
+                    is_test: row.get(5)?,
                 },
             ))
         })?;
@@ -266,15 +297,22 @@ pub fn run_init(workspace: &Path) -> Result<(), Box<dyn Error>> {
 
                 let language = language_for_path(&absolute_path)?;
                 match parser::parse_code(&relative_path_str, &content, language) {
-                    Ok((nodes, calls)) => Some(ParsedFile {
-                        relative_path: relative_path_str,
-                        language,
-                        content_hash: current_hash,
-                        size_bytes,
-                        last_modified,
-                        nodes,
-                        calls,
-                    }),
+                    Ok((mut nodes, calls)) => {
+                        let is_test = is_test_path(file_path);
+                        for node in &mut nodes {
+                            node.is_test = is_test;
+                        }
+                        Some(ParsedFile {
+                            relative_path: relative_path_str,
+                            language,
+                            content_hash: current_hash,
+                            size_bytes,
+                            last_modified,
+                            is_test,
+                            nodes,
+                            calls,
+                        })
+                    }
                     Err(e) => {
                         error!("Error parsing {}: {}", relative_path_str, e);
                         None
@@ -313,6 +351,7 @@ pub fn run_init(workspace: &Path) -> Result<(), Box<dyn Error>> {
                 language: Some(pf.language.to_string()),
                 size_bytes: Some(pf.size_bytes),
                 last_modified: Some(pf.last_modified),
+                is_test: pf.is_test,
             },
         )?;
     }

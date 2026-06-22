@@ -38,6 +38,10 @@ pub struct Node {
     pub end_column: i64,
     pub signature: Option<String>,
     pub doc_comment: Option<String>,
+    /// Whether this symbol lives in test code (classified by file path at index
+    /// time). Defaults false; populated by `map_row_to_node` from the column.
+    #[serde(default)]
+    pub is_test: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -54,6 +58,7 @@ pub struct FileMetadata {
     pub language: Option<String>,
     pub size_bytes: Option<i64>,
     pub last_modified: Option<i64>,
+    pub is_test: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -118,6 +123,7 @@ pub(crate) fn map_row_to_node(row: &rusqlite::Row) -> rusqlite::Result<Node> {
         end_column: row.get(8)?,
         signature: row.get(9)?,
         doc_comment: row.get(10)?,
+        is_test: row.get(11)?,
     })
 }
 
@@ -151,6 +157,7 @@ mod tests {
             language: Some("rust".to_string()),
             size_bytes: Some(1024),
             last_modified: Some(1670000000),
+            is_test: false,
         };
         upsert_file_metadata(&conn, &file_meta).unwrap();
 
@@ -171,6 +178,7 @@ mod tests {
             end_column: 1,
             signature: Some("fn main()".to_string()),
             doc_comment: Some("Main entrypoint".to_string()),
+            is_test: false,
         };
 
         let node_helper = Node {
@@ -185,6 +193,7 @@ mod tests {
             end_column: 0,
             signature: Some("fn helper()".to_string()),
             doc_comment: Some("Helper function that does magic".to_string()),
+            is_test: false,
         };
 
         upsert_node(&conn, &node_main).unwrap();

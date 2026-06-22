@@ -6,6 +6,14 @@ use serde_json::json;
 use std::error::Error;
 use std::path::Path;
 
+struct FileRow {
+    path: String,
+    language: Option<String>,
+    size_bytes: Option<i64>,
+    is_test: bool,
+    symbol_count: i64,
+}
+
 /// The `status` command:
 /// - Displays statistics: number of files, nodes, and edges currently indexed in the database.
 pub fn run_status(workspace: &Path, json: bool) -> Result<(), Box<dyn Error>> {
@@ -78,28 +86,35 @@ pub fn run_files(workspace: &Path, json: bool) -> Result<(), Box<dyn Error>> {
     let conn = Connection::open(&db_path)?;
 
     let mut stmt = conn.prepare(
-        "SELECT f.file_path, f.language, f.size_bytes, COUNT(n.id) \
+        "SELECT f.file_path, f.language, f.size_bytes, f.is_test, COUNT(n.id) \
          FROM files f \
          LEFT JOIN nodes n ON f.file_path = n.file_path \
          GROUP BY f.file_path \
          ORDER BY f.file_path",
     )?;
 
-    let rows: Vec<(String, Option<String>, Option<i64>, i64)> = stmt
+    let rows: Vec<FileRow> = stmt
         .query_map([], |row| {
-            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+            Ok(FileRow {
+                path: row.get(0)?,
+                language: row.get(1)?,
+                size_bytes: row.get(2)?,
+                is_test: row.get(3)?,
+                symbol_count: row.get(4)?,
+            })
         })?
         .collect::<rusqlite::Result<_>>()?;
 
     if json {
         let files: Vec<_> = rows
             .iter()
-            .map(|(path, lang, size, count)| {
+            .map(|row| {
                 json!({
-                    "file_path": path,
-                    "language": lang,
-                    "size_bytes": size,
-                    "symbols": count,
+                    "file_path": row.path,
+                    "language": row.language,
+                    "size_bytes": row.size_bytes,
+                    "is_test": row.is_test,
+                    "symbols": row.symbol_count,
                 })
             })
             .collect();
@@ -108,20 +123,21 @@ pub fn run_files(workspace: &Path, json: bool) -> Result<(), Box<dyn Error>> {
     }
 
     println!(
-        "{:<40} {:<10} {:<10} {:<12}",
-        "File Path", "Language", "Size (B)", "Symbols"
+        "{:<40} {:<10} {:<10} {:<8} {:<12}",
+        "File Path", "Language", "Size (B)", "Test", "Symbols"
     );
-    println!("{}", "-".repeat(76));
+    println!("{}", "-".repeat(85));
 
-    for (path, lang, size, symbol_count) in rows {
-        let lang_str = lang.unwrap_or_else(|| "unknown".to_string());
-        let size_str = size
+    for row in rows {
+        let lang_str = row.language.unwrap_or_else(|| "unknown".to_string());
+        let size_str = row
+            .size_bytes
             .map(|s| s.to_string())
             .unwrap_or_else(|| "-".to_string());
 
         println!(
-            "{:<40} {:<10} {:<10} {:<12}",
-            path, lang_str, size_str, symbol_count
+            "{:<40} {:<10} {:<10} {:<8} {:<12}",
+            row.path, lang_str, size_str, row.is_test, row.symbol_count
         );
     }
 

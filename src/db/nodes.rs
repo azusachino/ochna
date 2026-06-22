@@ -11,8 +11,8 @@ pub fn upsert_node(conn: &Connection, node: &Node) -> rusqlite::Result<()> {
         "INSERT OR REPLACE INTO nodes (
             id, name, kind, qualified_name, file_path,
             start_line, end_line, start_column, end_column,
-            signature, doc_comment
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            signature, doc_comment, is_test
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )?;
     stmt.execute((
         &node.id,
@@ -26,6 +26,7 @@ pub fn upsert_node(conn: &Connection, node: &Node) -> rusqlite::Result<()> {
         node.end_column,
         &node.signature,
         &node.doc_comment,
+        node.is_test,
     ))?;
     Ok(())
 }
@@ -62,7 +63,7 @@ pub fn query_nodes(
     kind: Option<&str>,
     file_path: Option<&str>,
 ) -> rusqlite::Result<Vec<Node>> {
-    let mut query = "SELECT id, name, kind, qualified_name, file_path, start_line, end_line, start_column, end_column, signature, doc_comment FROM nodes WHERE 1=1".to_string();
+    let mut query = "SELECT id, name, kind, qualified_name, file_path, start_line, end_line, start_column, end_column, signature, doc_comment, is_test FROM nodes WHERE 1=1".to_string();
 
     let mut name_bind = None;
     let mut kind_bind = None;
@@ -112,7 +113,7 @@ pub fn find_callers(
         let mut stmt = conn.prepare(
             "SELECT n.id, n.name, n.kind, n.qualified_name, n.file_path, \
                     n.start_line, n.end_line, n.start_column, n.end_column, \
-                    n.signature, n.doc_comment \
+                    n.signature, n.doc_comment, n.is_test \
              FROM nodes n \
              JOIN edges e ON n.nid = e.source_nid \
              WHERE e.target_nid = (SELECT nid FROM nodes WHERE id = ?) AND e.kind = ?",
@@ -127,7 +128,7 @@ pub fn find_callers(
         let mut stmt = conn.prepare(
             "SELECT n.id, n.name, n.kind, n.qualified_name, n.file_path, \
                     n.start_line, n.end_line, n.start_column, n.end_column, \
-                    n.signature, n.doc_comment \
+                    n.signature, n.doc_comment, n.is_test \
              FROM nodes n \
              JOIN edges e ON n.nid = e.source_nid \
              WHERE e.target_nid = (SELECT nid FROM nodes WHERE id = ?)",
@@ -151,7 +152,7 @@ pub fn find_callees(
         let mut stmt = conn.prepare(
             "SELECT n.id, n.name, n.kind, n.qualified_name, n.file_path, \
                     n.start_line, n.end_line, n.start_column, n.end_column, \
-                    n.signature, n.doc_comment \
+                    n.signature, n.doc_comment, n.is_test \
              FROM nodes n \
              JOIN edges e ON n.nid = e.target_nid \
              WHERE e.source_nid = (SELECT nid FROM nodes WHERE id = ?) AND e.kind = ?",
@@ -166,7 +167,7 @@ pub fn find_callees(
         let mut stmt = conn.prepare(
             "SELECT n.id, n.name, n.kind, n.qualified_name, n.file_path, \
                     n.start_line, n.end_line, n.start_column, n.end_column, \
-                    n.signature, n.doc_comment \
+                    n.signature, n.doc_comment, n.is_test \
              FROM nodes n \
              JOIN edges e ON n.nid = e.target_nid \
              WHERE e.source_nid = (SELECT nid FROM nodes WHERE id = ?)",
@@ -185,7 +186,7 @@ pub fn search_nodes_fts(conn: &Connection, query_str: &str) -> rusqlite::Result<
     let mut stmt = conn.prepare(
         "SELECT n.id, n.name, n.kind, n.qualified_name, n.file_path, \
                 n.start_line, n.end_line, n.start_column, n.end_column, \
-                n.signature, n.doc_comment \
+                n.signature, n.doc_comment, n.is_test \
          FROM nodes n \
          JOIN nodes_fts f ON n.rowid = f.rowid \
          WHERE nodes_fts MATCH ? \

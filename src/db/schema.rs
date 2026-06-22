@@ -7,7 +7,7 @@ use rusqlite::Connection;
 
 /// Current on-disk schema version. Bump when a change is not backward
 /// compatible; `init_schema` then drops the data tables and the caller rebuilds.
-const SCHEMA_VERSION: i64 = 2;
+const SCHEMA_VERSION: i64 = 3;
 
 // `nid` aliases rowid (the compact surrogate referenced by every edge/call);
 // `id` keeps the human-readable "file::symbol" key, UNIQUE so resolution and
@@ -24,7 +24,8 @@ const NODES: &str = "CREATE TABLE IF NOT EXISTS nodes (
         start_column INTEGER NOT NULL,
         end_column INTEGER NOT NULL,
         signature TEXT,
-        doc_comment TEXT
+        doc_comment TEXT,
+        is_test INTEGER NOT NULL DEFAULT 0
      )";
 
 // WITHOUT ROWID folds the (source_nid, target_nid, kind) primary key into the
@@ -43,7 +44,8 @@ const FILES: &str = "CREATE TABLE IF NOT EXISTS files (
         content_hash TEXT NOT NULL,
         language TEXT,
         size_bytes INTEGER,
-        last_modified INTEGER
+        last_modified INTEGER,
+        is_test INTEGER NOT NULL DEFAULT 0
      )";
 
 const UNRESOLVED_REFS: &str = "CREATE TABLE IF NOT EXISTS unresolved_refs (
@@ -143,6 +145,7 @@ const MIGRATION_DROP: &[&str] = &[
     "unresolved_refs",
     "nodes_fts",
     "nodes",
+    "files",
 ];
 
 /// Initialize the SQLite database schema.

@@ -100,7 +100,7 @@ mod tests {
         fs::write(target_dir.join("binary.rs"), "dummy rust in target").unwrap();
 
         // 2. Run run_init
-        run_init(&temp_workspace).unwrap();
+        run_init(&temp_workspace, false).unwrap();
 
         // Verify .ochna/ochna.db was created
         let db_path = temp_workspace.join(".ochna").join("ochna.db");
@@ -135,10 +135,10 @@ mod tests {
         run_files(&temp_workspace, true).unwrap();
 
         // Verify new query commands query the SQLite database successfully and print expected output formats
-        run_search(&temp_workspace, "helper", false).unwrap();
-        run_search(&temp_workspace, "helper", true).unwrap();
-        run_callers(&temp_workspace, "helper", false).unwrap();
-        run_callers(&temp_workspace, "helper", true).unwrap();
+        run_search(&temp_workspace, "helper", false, false).unwrap();
+        run_search(&temp_workspace, "helper", true, false).unwrap();
+        run_callers(&temp_workspace, "helper", false, false).unwrap();
+        run_callers(&temp_workspace, "helper", true, false).unwrap();
 
         // Test run_node with file (symbols_only = false)
         run_node(
@@ -150,6 +150,7 @@ mod tests {
             None,
             false,
             None,
+            false,
             false,
         )
         .unwrap();
@@ -164,6 +165,7 @@ mod tests {
             false,
             None,
             false,
+            false,
         )
         .unwrap();
         // Test run_node with symbol (include_code = true)
@@ -176,6 +178,7 @@ mod tests {
             Some("helper".to_string()),
             true,
             None,
+            false,
             false,
         )
         .unwrap();
@@ -190,6 +193,7 @@ mod tests {
             true,
             None,
             true,
+            false,
         )
         .unwrap();
         // Test run_node with symbol (include_code = true and line filtering)
@@ -203,12 +207,13 @@ mod tests {
             true,
             Some(6),
             false,
+            false,
         )
         .unwrap();
 
         // Test run_explore (text + json)
-        run_explore(&temp_workspace, "helper", false).unwrap();
-        run_explore(&temp_workspace, "helper", true).unwrap();
+        run_explore(&temp_workspace, "helper", false, false).unwrap();
+        run_explore(&temp_workspace, "helper", true, false).unwrap();
 
         // 3. Modify a file and check that re-indexing works
         let rust_code_modified = r#"
@@ -220,7 +225,7 @@ mod tests {
         fs::write(&rust_file, rust_code_modified).unwrap();
 
         // FileMetadata updates
-        run_init(&temp_workspace).unwrap();
+        run_init(&temp_workspace, false).unwrap();
 
         let nodes_count_after: i64 = conn
             .query_row("SELECT COUNT(*) FROM nodes", [], |row| row.get(0))
@@ -246,7 +251,7 @@ mod tests {
         .unwrap();
         fs::write(src_dir.join("b.rs"), "fn target() {}\n").unwrap();
 
-        run_init(&temp_workspace).unwrap();
+        run_init(&temp_workspace, false).unwrap();
 
         let db_path = temp_workspace.join(".ochna").join("ochna.db");
         let conn = Connection::open(&db_path).unwrap();
@@ -278,6 +283,76 @@ mod tests {
     }
 
     #[test]
+    fn test_scope_classification_tags_tests_and_skips_libraries() {
+        let temp_workspace = create_temp_dir();
+        fs::create_dir_all(temp_workspace.join("src/test/java")).unwrap();
+        fs::create_dir_all(temp_workspace.join("tests")).unwrap();
+        fs::create_dir_all(temp_workspace.join("vendor")).unwrap();
+        fs::create_dir_all(temp_workspace.join("target")).unwrap();
+
+        fs::write(temp_workspace.join("src/main.rs"), "fn app_main() {}\n").unwrap();
+        fs::write(
+            temp_workspace.join("tests/parser.rs"),
+            "fn parser_test() {}\n",
+        )
+        .unwrap();
+        fs::write(
+            temp_workspace.join("client_test.go"),
+            "package main\nfunc TestClient() {}\n",
+        )
+        .unwrap();
+        fs::write(
+            temp_workspace.join("src/test/java/AppTest.java"),
+            "public class AppTest { public void runs() {} }\n",
+        )
+        .unwrap();
+        fs::write(temp_workspace.join("vendor/lib.rs"), "fn vendored() {}\n").unwrap();
+        fs::write(
+            temp_workspace.join("target/generated.rs"),
+            "fn generated() {}\n",
+        )
+        .unwrap();
+
+        run_init(&temp_workspace, false).unwrap();
+
+        let db_path = temp_workspace.join(".ochna").join("ochna.db");
+        let conn = Connection::open(&db_path).unwrap();
+        let files_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM files", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(files_count, 4, "library directories should be skipped");
+
+        let test_files: i64 = conn
+            .query_row("SELECT COUNT(*) FROM files WHERE is_test = 1", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(test_files, 3);
+
+        let test_nodes: i64 = conn
+            .query_row("SELECT COUNT(*) FROM nodes WHERE is_test = 1", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert!(test_nodes >= 3);
+
+        run_init(&temp_workspace, true).unwrap();
+        let library_files: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM files WHERE file_path IN ('vendor/lib.rs', 'target/generated.rs')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            library_files, 2,
+            "--include-library should index library dirs"
+        );
+
+        fs::remove_dir_all(&temp_workspace).unwrap();
+    }
+
+    #[test]
     fn test_fresh_init_rebuilds_fts_index() {
         let temp_workspace = create_temp_dir();
         let src_dir = temp_workspace.join("src");
@@ -288,7 +363,7 @@ mod tests {
         )
         .unwrap();
 
-        run_init(&temp_workspace).unwrap();
+        run_init(&temp_workspace, false).unwrap();
 
         let db_path = temp_workspace.join(".ochna").join("ochna.db");
         let conn = Connection::open(&db_path).unwrap();
@@ -311,7 +386,7 @@ mod tests {
         )
         .unwrap();
 
-        run_init(&temp_workspace).unwrap();
+        run_init(&temp_workspace, false).unwrap();
 
         let db_path = temp_workspace.join(".ochna").join("ochna.db");
         let conn = Connection::open(&db_path).unwrap();
@@ -322,7 +397,7 @@ mod tests {
             "/// Mentions the replacement marker.\nfn searchable() {}\n",
         )
         .unwrap();
-        run_init(&temp_workspace).unwrap();
+        run_init(&temp_workspace, false).unwrap();
 
         assert_eq!(db::search_nodes_fts(&conn, "replacement").unwrap().len(), 1);
         assert!(
@@ -331,7 +406,7 @@ mod tests {
         );
 
         fs::remove_file(&rust_file).unwrap();
-        run_init(&temp_workspace).unwrap();
+        run_init(&temp_workspace, false).unwrap();
 
         assert!(
             db::search_nodes_fts(&conn, "replacement")
@@ -358,11 +433,11 @@ mod tests {
         .unwrap();
         fs::write(&old_target_file, "fn target() {}\n").unwrap();
 
-        run_init(&temp_workspace).unwrap();
+        run_init(&temp_workspace, false).unwrap();
 
         fs::write(&old_target_file, "fn other() {}\n").unwrap();
         fs::write(&new_target_file, "fn target() {}\n").unwrap();
-        run_init(&temp_workspace).unwrap();
+        run_init(&temp_workspace, false).unwrap();
 
         let db_path = temp_workspace.join(".ochna").join("ochna.db");
         let conn = Connection::open(&db_path).unwrap();
@@ -415,7 +490,7 @@ mod tests {
         fs::create_dir_all(&src_dir).unwrap();
         fs::write(src_dir.join("a.rs"), "fn caller() {\n    missing();\n}\n").unwrap();
 
-        run_init(&temp_workspace).unwrap();
+        run_init(&temp_workspace, false).unwrap();
 
         let db_path = temp_workspace.join(".ochna").join("ochna.db");
         let conn = Connection::open(&db_path).unwrap();
@@ -429,7 +504,7 @@ mod tests {
         assert_eq!(unresolved_before, 1);
 
         fs::write(src_dir.join("b.rs"), "fn missing() {}\n").unwrap();
-        run_init(&temp_workspace).unwrap();
+        run_init(&temp_workspace, false).unwrap();
 
         let resolved_edge: i64 = conn
             .query_row(

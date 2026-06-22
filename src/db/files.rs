@@ -6,14 +6,15 @@ use rusqlite::Connection;
 /// Upsert file metadata into the database (INSERT OR REPLACE)
 pub fn upsert_file_metadata(conn: &Connection, file: &FileMetadata) -> rusqlite::Result<()> {
     conn.execute(
-        "INSERT OR REPLACE INTO files (file_path, content_hash, language, size_bytes, last_modified)
-         VALUES (?, ?, ?, ?, ?)",
+        "INSERT OR REPLACE INTO files (file_path, content_hash, language, size_bytes, last_modified, is_test)
+         VALUES (?, ?, ?, ?, ?, ?)",
         (
             &file.file_path,
             &file.content_hash,
             &file.language,
             file.size_bytes,
             file.last_modified,
+            file.is_test,
         ),
     )?;
     Ok(())
@@ -25,7 +26,7 @@ pub fn get_file_metadata(
     file_path: &str,
 ) -> rusqlite::Result<Option<FileMetadata>> {
     let mut stmt = conn.prepare(
-        "SELECT file_path, content_hash, language, size_bytes, last_modified FROM files WHERE file_path = ?"
+        "SELECT file_path, content_hash, language, size_bytes, last_modified, is_test FROM files WHERE file_path = ?"
     )?;
     let mut rows = stmt.query([file_path])?;
     if let Some(row) = rows.next()? {
@@ -35,6 +36,7 @@ pub fn get_file_metadata(
             language: row.get(2)?,
             size_bytes: row.get(3)?,
             last_modified: row.get(4)?,
+            is_test: row.get(5)?,
         }))
     } else {
         Ok(None)

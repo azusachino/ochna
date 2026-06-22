@@ -269,6 +269,7 @@ fn test_free_fn() {
                 end_column: 0,
                 signature: None,
                 doc_comment: None,
+                is_test: false,
             },
             Node {
                 id: "src/shapes.rs::Line::new".to_string(),
@@ -282,6 +283,7 @@ fn test_free_fn() {
                 end_column: 0,
                 signature: None,
                 doc_comment: None,
+                is_test: false,
             },
             Node {
                 id: "src/shapes.rs::build".to_string(),
@@ -295,6 +297,7 @@ fn test_free_fn() {
                 end_column: 0,
                 signature: None,
                 doc_comment: None,
+                is_test: false,
             },
         ];
         let calls = vec![RawCall::new(
@@ -326,6 +329,7 @@ fn test_free_fn() {
                 end_column: 0,
                 signature: None,
                 doc_comment: None,
+                is_test: false,
             },
             Node {
                 id: "src/shapes.rs::Point::sum".to_string(),
@@ -339,6 +343,7 @@ fn test_free_fn() {
                 end_column: 0,
                 signature: None,
                 doc_comment: None,
+                is_test: false,
             },
         ];
 

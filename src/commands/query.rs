@@ -10,7 +10,7 @@ use std::path::Path;
 
 fn query_nodes_by_like(conn: &Connection, pattern: &str) -> rusqlite::Result<Vec<db::Node>> {
     let mut stmt = conn.prepare(
-        "SELECT id, name, kind, qualified_name, file_path, start_line, end_line, start_column, end_column, signature, doc_comment \
+        "SELECT id, name, kind, qualified_name, file_path, start_line, end_line, start_column, end_column, signature, doc_comment, is_test \
          FROM nodes \
          WHERE name LIKE ? OR qualified_name LIKE ? OR id LIKE ?"
     )?;
@@ -29,6 +29,7 @@ fn query_nodes_by_like(conn: &Connection, pattern: &str) -> rusqlite::Result<Vec
             end_column: row.get(8)?,
             signature: row.get(9)?,
             doc_comment: row.get(10)?,
+            is_test: row.get(11)?,
         });
     }
     Ok(nodes)
@@ -36,7 +37,7 @@ fn query_nodes_by_like(conn: &Connection, pattern: &str) -> rusqlite::Result<Vec
 
 fn query_nodes_by_id_or_qual(conn: &Connection, symbol: &str) -> rusqlite::Result<Vec<db::Node>> {
     let mut stmt = conn.prepare(
-        "SELECT id, name, kind, qualified_name, file_path, start_line, end_line, start_column, end_column, signature, doc_comment \
+        "SELECT id, name, kind, qualified_name, file_path, start_line, end_line, start_column, end_column, signature, doc_comment, is_test \
          FROM nodes \
          WHERE id = ? OR qualified_name = ?"
     )?;
@@ -55,6 +56,7 @@ fn query_nodes_by_id_or_qual(conn: &Connection, symbol: &str) -> rusqlite::Resul
             end_column: row.get(8)?,
             signature: row.get(9)?,
             doc_comment: row.get(10)?,
+            is_test: row.get(11)?,
         });
     }
     Ok(nodes)
@@ -86,6 +88,12 @@ fn emit_nodes(nodes: &[db::Node], json: bool, empty_msg: &str) -> Result<(), Box
     Ok(())
 }
 
+fn retain_non_tests(nodes: &mut Vec<db::Node>, no_tests: bool) {
+    if no_tests {
+        nodes.retain(|node| !node.is_test);
+    }
+}
+
 /// Read a node's source lines as `{line, text}` records, or `None` if unreadable.
 fn read_code_lines(workspace: &Path, node: &db::Node) -> Option<Vec<serde_json::Value>> {
     let abs_path = workspace.join(&node.file_path);
@@ -102,7 +110,12 @@ fn read_code_lines(workspace: &Path, node: &db::Node) -> Option<Vec<serde_json::
     )
 }
 
-pub fn run_search(workspace: &Path, query: &str, json: bool) -> Result<(), Box<dyn Error>> {
+pub fn run_search(
+    workspace: &Path,
+    query: &str,
+    json: bool,
+    no_tests: bool,
+) -> Result<(), Box<dyn Error>> {
     let conn = open_db(workspace)?;
 
     // Try FTS first
@@ -123,10 +136,16 @@ pub fn run_search(workspace: &Path, query: &str, json: bool) -> Result<(), Box<d
         }
     }
 
+    retain_non_tests(&mut nodes, no_tests);
     emit_nodes(&nodes, json, "No matching nodes found.")
 }
 
-pub fn run_callers(workspace: &Path, symbol: &str, json: bool) -> Result<(), Box<dyn Error>> {
+pub fn run_callers(
+    workspace: &Path,
+    symbol: &str,
+    json: bool,
+    no_tests: bool,
+) -> Result<(), Box<dyn Error>> {
     let conn = open_db(workspace)?;
 
     // Find nodes matching the symbol name or symbol ID
@@ -138,6 +157,7 @@ pub fn run_callers(workspace: &Path, symbol: &str, json: bool) -> Result<(), Box
             target_nodes = res;
         }
     }
+    retain_non_tests(&mut target_nodes, no_tests);
 
     if target_nodes.is_empty() {
         return emit_nodes(
@@ -153,6 +173,7 @@ pub fn run_callers(workspace: &Path, symbol: &str, json: bool) -> Result<(), Box
             callers.extend(node_callers);
         }
     }
+    retain_non_tests(&mut callers, no_tests);
 
     // Deduplicate callers
     callers.sort_by(|a, b| a.id.cmp(&b.id));
@@ -172,6 +193,7 @@ pub fn run_node(
     include_code: bool,
     line: Option<i64>,
     json: bool,
+    no_tests: bool,
 ) -> Result<(), Box<dyn Error>> {
     let conn = open_db(workspace)?;
 
@@ -183,6 +205,8 @@ pub fn run_node(
                 Ok(res) => res,
                 Err(e) => return Err(format!("Failed to query nodes for file: {}", e).into()),
             };
+            let mut file_nodes = file_nodes;
+            retain_non_tests(&mut file_nodes, no_tests);
 
             if symbols_only {
                 if json {
@@ -230,6 +254,7 @@ pub fn run_node(
                     }
                 }
             }
+            retain_non_tests(&mut dependents, no_tests);
             dependents.sort_by(|a, b| a.id.cmp(&b.id));
             dependents.dedup_by(|a, b| a.id == b.id);
 
@@ -284,6 +309,7 @@ pub fn run_node(
             if let Some(target_line) = line {
                 target_nodes.retain(|n| target_line >= n.start_line && target_line <= n.end_line);
             }
+            retain_non_tests(&mut target_nodes, no_tests);
 
             if target_nodes.is_empty() {
                 if json {
@@ -303,9 +329,11 @@ pub fn run_node(
                         None
                     };
                     let mut callers = db::find_callers(&conn, &node.id, None).unwrap_or_default();
+                    retain_non_tests(&mut callers, no_tests);
                     callers.sort_by(|a, b| a.id.cmp(&b.id));
                     callers.dedup_by(|a, b| a.id == b.id);
                     let mut callees = db::find_callees(&conn, &node.id, None).unwrap_or_default();
+                    retain_non_tests(&mut callees, no_tests);
                     callees.sort_by(|a, b| a.id.cmp(&b.id));
                     callees.dedup_by(|a, b| a.id == b.id);
                     out.push(json!({
@@ -361,10 +389,12 @@ pub fn run_node(
 
                 // Callers & Callees
                 let mut callers = db::find_callers(&conn, &node.id, None).unwrap_or_default();
+                retain_non_tests(&mut callers, no_tests);
                 callers.sort_by(|a, b| a.id.cmp(&b.id));
                 callers.dedup_by(|a, b| a.id == b.id);
 
                 let mut callees = db::find_callees(&conn, &node.id, None).unwrap_or_default();
+                retain_non_tests(&mut callees, no_tests);
                 callees.sort_by(|a, b| a.id.cmp(&b.id));
                 callees.dedup_by(|a, b| a.id == b.id);
 
@@ -405,7 +435,12 @@ pub fn run_node(
     Ok(())
 }
 
-pub fn run_explore(workspace: &Path, query: &str, json: bool) -> Result<(), Box<dyn Error>> {
+pub fn run_explore(
+    workspace: &Path,
+    query: &str,
+    json: bool,
+    no_tests: bool,
+) -> Result<(), Box<dyn Error>> {
     let conn = open_db(workspace)?;
 
     // Find matching nodes (using search logic)
@@ -421,6 +456,7 @@ pub fn run_explore(workspace: &Path, query: &str, json: bool) -> Result<(), Box<
             nodes = res;
         }
     }
+    retain_non_tests(&mut nodes, no_tests);
 
     if nodes.is_empty() {
         if json {
@@ -447,9 +483,11 @@ pub fn run_explore(workspace: &Path, query: &str, json: bool) -> Result<(), Box<
             let mut symbols = Vec::new();
             for node in file_nodes {
                 let mut callers = db::find_callers(&conn, &node.id, None).unwrap_or_default();
+                retain_non_tests(&mut callers, no_tests);
                 callers.sort_by(|a, b| a.id.cmp(&b.id));
                 callers.dedup_by(|a, b| a.id == b.id);
                 let mut callees = db::find_callees(&conn, &node.id, None).unwrap_or_default();
+                retain_non_tests(&mut callees, no_tests);
                 callees.sort_by(|a, b| a.id.cmp(&b.id));
                 callees.dedup_by(|a, b| a.id == b.id);
                 symbols.push(json!({
@@ -492,10 +530,12 @@ pub fn run_explore(workspace: &Path, query: &str, json: bool) -> Result<(), Box<
 
             // Query callers/callees
             let mut callers = db::find_callers(&conn, &node.id, None).unwrap_or_default();
+            retain_non_tests(&mut callers, no_tests);
             callers.sort_by(|a, b| a.id.cmp(&b.id));
             callers.dedup_by(|a, b| a.id == b.id);
 
             let mut callees = db::find_callees(&conn, &node.id, None).unwrap_or_default();
+            retain_non_tests(&mut callees, no_tests);
             callees.sort_by(|a, b| a.id.cmp(&b.id));
             callees.dedup_by(|a, b| a.id == b.id);
 
@@ -529,4 +569,37 @@ pub fn run_explore(workspace: &Path, query: &str, json: bool) -> Result<(), Box<
 
     println!("{}", output.join("\n"));
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn node(id: &str, is_test: bool) -> db::Node {
+        db::Node {
+            id: id.to_string(),
+            name: id.to_string(),
+            kind: "function".to_string(),
+            qualified_name: Some(id.to_string()),
+            file_path: "src/main.rs".to_string(),
+            start_line: 1,
+            end_line: 1,
+            start_column: 0,
+            end_column: 0,
+            signature: None,
+            doc_comment: None,
+            is_test,
+        }
+    }
+
+    #[test]
+    fn retain_non_tests_filters_only_when_requested() {
+        let mut nodes = vec![node("prod", false), node("test", true)];
+        retain_non_tests(&mut nodes, false);
+        assert_eq!(nodes.len(), 2);
+
+        retain_non_tests(&mut nodes, true);
+        assert_eq!(nodes.len(), 1);
+        assert_eq!(nodes[0].id, "prod");
+    }
 }
