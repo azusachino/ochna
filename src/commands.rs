@@ -528,4 +528,180 @@ mod tests {
 
         fs::remove_dir_all(&temp_workspace).unwrap();
     }
+
+    #[test]
+    fn test_call_resolution_baseline_fixtures() {
+        let temp_workspace = create_temp_dir();
+        let src_dir = temp_workspace.join("src");
+        fs::create_dir_all(&src_dir).unwrap();
+
+        // 1. Go Fixtures
+        let go_code = r#"
+            package main
+            
+            type Cacher struct {}
+            func (c *Cacher) GetList() {}
+            func (c *Cacher) Add() {}
+            func (c *Cacher) Run() {}
+            
+            type Queue struct {}
+            func (q *Queue) GetList() {}
+            func (q *Queue) Add() {}
+            func (q *Queue) Run() {}
+            
+            func Run() {}
+            
+            func work() {
+                c := &Cacher{}
+                c.GetList()
+                c.Add()
+                c.Run()
+                
+                q := &Queue{}
+                q.GetList()
+                q.Add()
+                q.Run()
+                
+                Run()
+            }
+        "#;
+        fs::write(src_dir.join("main.go"), go_code).unwrap();
+
+        // 2. Java Fixtures
+        let java_code_app = r#"
+            package demo;
+            import demo.StaticHelper;
+            
+            class Promise {
+                public void release() {}
+                public void tryFailure() {}
+                public void run() {}
+            }
+            
+            class TrafficHandler {
+                public void release() {}
+                public void tryFailure() {}
+                public void run() {}
+            }
+            
+            public class App {
+                public static void main(String[] args) {
+                    Promise promise = new Promise();
+                    promise.release();
+                    promise.tryFailure();
+                    promise.run();
+                    
+                    TrafficHandler handler = new TrafficHandler();
+                    handler.release();
+                    handler.tryFailure();
+                    handler.run();
+                    
+                    StaticHelper.run();
+                }
+            }
+        "#;
+        fs::write(src_dir.join("App.java"), java_code_app).unwrap();
+
+        let java_code_helper = r#"
+            package demo;
+            public class StaticHelper {
+                public static void run() {}
+            }
+        "#;
+        fs::write(src_dir.join("StaticHelper.java"), java_code_helper).unwrap();
+
+        // 3. C Fixtures
+        let c_code = r#"
+            void helper(void) {}
+            #define MY_MACRO(x) x
+            
+            int main(void) {
+                helper();
+                MY_MACRO(1);
+                void (*ptr)(void) = helper;
+                ptr();
+                return 0;
+            }
+        "#;
+        fs::write(src_dir.join("main.c"), c_code).unwrap();
+
+        run_init(&temp_workspace, false).unwrap();
+
+        let db_path = temp_workspace.join(".ochna").join("ochna.db");
+        let conn = Connection::open(&db_path).unwrap();
+
+        let mut stmt = conn
+            .prepare(
+                "SELECT (SELECT id FROM nodes WHERE nid = source_nid) as src, \
+                        (SELECT id FROM nodes WHERE nid = target_nid) as tgt \
+                 FROM edges ORDER BY src, tgt",
+            )
+            .unwrap();
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, Option<String>>(0)?.unwrap_or_default(),
+                    row.get::<_, Option<String>>(1)?.unwrap_or_default(),
+                ))
+            })
+            .unwrap();
+
+        let mut edges_resolved = Vec::new();
+        for r in rows {
+            let (src, tgt) = r.unwrap();
+            edges_resolved.push(format!("{} -> {}", src, tgt));
+        }
+
+        println!("Resolved edges:\n{}", edges_resolved.join("\n"));
+
+        // Let's also check unresolved refs to see how macro and indirect pointer calls are handled
+        let mut stmt = conn
+            .prepare("SELECT (SELECT id FROM nodes WHERE nid = source_nid), specifier FROM unresolved_refs ORDER BY specifier")
+            .unwrap();
+        let unresolved_rows = stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, Option<String>>(0)?.unwrap_or_default(),
+                    row.get::<_, String>(1)?,
+                ))
+            })
+            .unwrap();
+        let mut unresolved = Vec::new();
+        for r in unresolved_rows {
+            let (src, specifier) = r.unwrap();
+            unresolved.push(format!("{} -> (unresolved) {}", src, specifier));
+        }
+        println!("Unresolved refs:\n{}", unresolved.join("\n"));
+
+        // Noise assertions:
+        // Go: Both calls to GetList, Add, Run in work() resolve to Cacher instead of their respective types or global.
+        assert!(edges_resolved
+            .contains(&"src/main.go::work -> src/main.go::Cacher::GetList".to_string()));
+        assert!(
+            edges_resolved.contains(&"src/main.go::work -> src/main.go::Cacher::Add".to_string())
+        );
+        assert!(
+            edges_resolved.contains(&"src/main.go::work -> src/main.go::Cacher::Run".to_string())
+        );
+        // Note: Queue's methods are not in target_id because the resolver picked Cacher's methods for both.
+        assert!(!edges_resolved.iter().any(|e| e.contains("Queue")));
+
+        // Java: Both promise.release() and handler.release() resolve to Promise::release
+        assert!(edges_resolved
+            .contains(&"src/App.java::App::main -> src/App.java::Promise::release".to_string()));
+        assert!(edges_resolved
+            .contains(&"src/App.java::App::main -> src/App.java::Promise::tryFailure".to_string()));
+        assert!(edges_resolved
+            .contains(&"src/App.java::App::main -> src/App.java::Promise::run".to_string()));
+        assert!(!edges_resolved
+            .iter()
+            .any(|e| e.contains("TrafficHandler::")));
+
+        // C: MY_MACRO and ptr should be unresolved
+        assert!(unresolved.contains(&"src/main.c::main -> (unresolved) MY_MACRO".to_string()));
+        assert!(unresolved.contains(&"src/main.c::main -> (unresolved) ptr".to_string()));
+
+        // Clean up
+        fs::remove_dir_all(&temp_workspace).unwrap();
+    }
 }
