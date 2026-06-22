@@ -98,11 +98,6 @@ For custom queries or advanced analytics directly from the SQLite database:
   uv run python pyscripts/report.py
   ```
   _This runs under Python 3.14 and directly extracts file distributions, symbol counts, and hot call sites using `sqlite3` without invoking the binary._
-- **Regenerate Benchmarks**:
-  ```bash
-  make report
-  ```
-  _Indexes the pinned benchmark submodules, including Spring PetClinic for route coverage, and rewrites `BENCHMARK.md`._
 
 ## Workflow Integration Rules
 
