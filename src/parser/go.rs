@@ -5,6 +5,7 @@ use super::common::{find_child_by_kind, get_doc_comment, get_signature, raw_call
 use crate::db::{Node, RawCall};
 
 /// Recursively traverses a Go AST.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn traverse_go<'a>(
     node: tree_sitter::Node<'a>,
     content: &'a str,
@@ -12,6 +13,8 @@ pub(super) fn traverse_go<'a>(
     nodes: &mut Vec<Node>,
     calls: &mut Vec<RawCall>,
     current_caller_id: Option<&str>,
+    package_name: Option<&str>,
+    imports: &[(Option<String>, String)],
 ) {
     let mut next_caller_id = current_caller_id;
     #[allow(unused_assignments)]
@@ -151,7 +154,28 @@ pub(super) fn traverse_go<'a>(
             if let Some(caller) = current_caller_id {
                 if let Some(func_node) = node.child_by_field_name("function") {
                     let func_name = extract_go_call_target(func_node, content);
-                    calls.push(raw_call(caller, func_name, node));
+                    let mut call = raw_call(caller, func_name, node);
+                    call.package_or_namespace = package_name.map(|s| s.to_string());
+
+                    if func_node.kind() == "selector_expression" {
+                        call.call_kind = Some("method".to_string());
+                        if let Some(operand_node) = func_node.child_by_field_name("operand") {
+                            let receiver = operand_node
+                                .utf8_text(content.as_bytes())
+                                .unwrap_or("")
+                                .trim()
+                                .to_string();
+                            if !receiver.is_empty() {
+                                call.receiver_expr = Some(receiver.clone());
+                                if let Some(hint) = find_go_import_hint(&receiver, imports) {
+                                    call.import_hint = Some(hint);
+                                }
+                            }
+                        }
+                    } else if func_node.kind() == "identifier" {
+                        call.call_kind = Some("function".to_string());
+                    }
+                    calls.push(call);
                 }
             }
         }
@@ -160,7 +184,16 @@ pub(super) fn traverse_go<'a>(
 
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {
-        traverse_go(child, content, file_path, nodes, calls, next_caller_id);
+        traverse_go(
+            child,
+            content,
+            file_path,
+            nodes,
+            calls,
+            next_caller_id,
+            package_name,
+            imports,
+        );
     }
 }
 
@@ -199,4 +232,69 @@ fn extract_go_call_target(node: tree_sitter::Node, content: &str) -> String {
         }
         _ => node.utf8_text(content.as_bytes()).unwrap_or("").to_string(),
     }
+}
+
+pub(super) fn collect_go_imports(
+    root: tree_sitter::Node,
+    content: &str,
+) -> Vec<(Option<String>, String)> {
+    let mut imports = Vec::new();
+    let mut cursor = root.walk();
+    for child in root.children(&mut cursor) {
+        if child.kind() == "import_declaration" {
+            let mut spec_cursor = child.walk();
+            for spec_child in child.children(&mut spec_cursor) {
+                if spec_child.kind() == "import_spec" {
+                    add_import_spec(spec_child, content, &mut imports);
+                } else if spec_child.kind() == "import_spec_list" {
+                    let mut list_cursor = spec_child.walk();
+                    for list_child in spec_child.children(&mut list_cursor) {
+                        if list_child.kind() == "import_spec" {
+                            add_import_spec(list_child, content, &mut imports);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    imports
+}
+
+fn add_import_spec(
+    node: tree_sitter::Node,
+    content: &str,
+    imports: &mut Vec<(Option<String>, String)>,
+) {
+    let alias = node.child_by_field_name("name").map(|n| {
+        n.utf8_text(content.as_bytes())
+            .unwrap_or("")
+            .trim()
+            .to_string()
+    });
+    if let Some(path_node) = node.child_by_field_name("path") {
+        let path_str = path_node
+            .utf8_text(content.as_bytes())
+            .unwrap_or("")
+            .trim()
+            .trim_matches('"')
+            .to_string();
+        imports.push((alias, path_str));
+    }
+}
+
+fn find_go_import_hint(name: &str, imports: &[(Option<String>, String)]) -> Option<String> {
+    for (alias, path) in imports {
+        if let Some(alias_str) = alias {
+            if alias_str == name {
+                return Some(path.clone());
+            }
+        } else {
+            if let Some(last_seg) = path.split('/').next_back() {
+                if last_seg == name {
+                    return Some(path.clone());
+                }
+            }
+        }
+    }
+    None
 }

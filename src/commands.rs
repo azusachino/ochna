@@ -704,4 +704,94 @@ mod tests {
         // Clean up
         fs::remove_dir_all(&temp_workspace).unwrap();
     }
+
+    #[test]
+    fn test_raw_call_metadata_capture() {
+        let temp_workspace = create_temp_dir();
+        let src_dir = temp_workspace.join("src");
+        fs::create_dir_all(&src_dir).unwrap();
+
+        // 1. Go code with imports and selectors
+        let go_code = r#"
+            package main
+            import (
+                "fmt"
+                storage "k8s.io/apiserver/pkg/storage"
+            )
+            func work() {
+                storage.ValidateListOptions()
+            }
+        "#;
+        fs::write(src_dir.join("main.go"), go_code).unwrap();
+
+        // 2. Java code with variable types
+        let java_code = r#"
+            package demo;
+            import io.netty.channel.ChannelPromise;
+            public class App {
+                public void method(ChannelPromise promise) {
+                    promise.tryFailure();
+                }
+            }
+        "#;
+        fs::write(src_dir.join("App.java"), java_code).unwrap();
+
+        run_init(&temp_workspace, false).unwrap();
+
+        let db_path = temp_workspace.join(".ochna").join("ochna.db");
+        let conn = Connection::open(&db_path).unwrap();
+
+        let mut stmt = conn
+            .prepare(
+                "SELECT callee_name, call_kind, receiver_expr, receiver_type, package_or_namespace, import_hint \
+                 FROM raw_calls ORDER BY callee_name",
+            )
+            .unwrap();
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                    row.get::<_, Option<String>>(4)?,
+                    row.get::<_, Option<String>>(5)?,
+                ))
+            })
+            .unwrap();
+
+        let mut raw_calls_verified = Vec::new();
+        for r in rows {
+            let (name, kind, rx, rx_t, ns, imp) = r.unwrap();
+            raw_calls_verified.push(format!(
+                "{} | {:?} | {:?} | {:?} | {:?} | {:?}",
+                name, kind, rx, rx_t, ns, imp
+            ));
+        }
+
+        println!("Raw calls metadata:\n{}", raw_calls_verified.join("\n"));
+
+        // Go assertions
+        let go_call = raw_calls_verified
+            .iter()
+            .find(|c| c.contains("ValidateListOptions"))
+            .unwrap();
+        assert!(go_call.contains(&r#"Some("method")"#.to_string()));
+        assert!(go_call.contains(&r#"Some("storage")"#.to_string()));
+        assert!(go_call.contains(&r#"Some("main")"#.to_string()));
+        assert!(go_call.contains(&r#"Some("k8s.io/apiserver/pkg/storage")"#.to_string()));
+
+        // Java assertions
+        let java_call = raw_calls_verified
+            .iter()
+            .find(|c| c.contains("tryFailure"))
+            .unwrap();
+        assert!(java_call.contains(&r#"Some("method")"#.to_string()));
+        assert!(java_call.contains(&r#"Some("promise")"#.to_string()));
+        assert!(java_call.contains(&r#"Some("ChannelPromise")"#.to_string()));
+        assert!(java_call.contains(&r#"Some("demo")"#.to_string()));
+        assert!(java_call.contains(&r#"Some("io.netty.channel.ChannelPromise")"#.to_string()));
+
+        fs::remove_dir_all(&temp_workspace).unwrap();
+    }
 }

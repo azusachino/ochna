@@ -83,6 +83,11 @@ pub struct RawCall {
     pub callee_name: String,
     pub callee_simple: String,
     pub callee_scope: Option<String>,
+    pub call_kind: Option<String>,
+    pub receiver_expr: Option<String>,
+    pub receiver_type: Option<String>,
+    pub package_or_namespace: Option<String>,
+    pub import_hint: Option<String>,
     pub line: i64,
     pub column: i64,
 }
@@ -95,6 +100,11 @@ impl RawCall {
             callee_name,
             callee_simple,
             callee_scope,
+            call_kind: None,
+            receiver_expr: None,
+            receiver_type: None,
+            package_or_namespace: None,
+            import_hint: None,
             line,
             column,
         }
@@ -130,13 +140,18 @@ pub(crate) fn map_row_to_node(row: &rusqlite::Row) -> rusqlite::Result<Node> {
 pub(crate) fn map_row_to_raw_call(row: &rusqlite::Row) -> rusqlite::Result<RawCall> {
     let caller_id: String = row.get(0)?;
     let callee_name: String = row.get(1)?;
-    let line: i64 = row.get(4)?;
-    let column: i64 = row.get(5)?;
+    let line: i64 = row.get(9)?;
+    let column: i64 = row.get(10)?;
     let mut call = RawCall::new(caller_id, callee_name, line, column);
     if let Some(callee_simple) = row.get::<_, Option<String>>(2)? {
         call.callee_simple = callee_simple;
     }
     call.callee_scope = row.get(3)?;
+    call.call_kind = row.get(4)?;
+    call.receiver_expr = row.get(5)?;
+    call.receiver_type = row.get(6)?;
+    call.package_or_namespace = row.get(7)?;
+    call.import_hint = row.get(8)?;
     Ok(call)
 }
 

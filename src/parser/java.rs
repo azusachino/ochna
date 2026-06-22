@@ -15,10 +15,16 @@ pub(super) fn traverse_java<'a>(
     current_parent_qualified_name: Option<&str>,
     current_caller_id: Option<&str>,
     current_controller_prefixes: Option<&[String]>,
+    package_name: Option<&str>,
+    imports: &[String],
+    local_types: Option<&std::collections::HashMap<String, String>>,
 ) {
     let mut next_parent_qualified_name = current_parent_qualified_name;
     let mut next_caller_id = current_caller_id;
     let mut next_controller_prefixes = current_controller_prefixes;
+    let mut next_local_types = local_types;
+    #[allow(unused_assignments)]
+    let mut local_types_holder = std::collections::HashMap::new();
 
     #[allow(unused_assignments)]
     let mut qname_holder = String::new();
@@ -30,6 +36,9 @@ pub(super) fn traverse_java<'a>(
     let kind = node.kind();
     match kind {
         "class_declaration" | "interface_declaration" => {
+            local_types_holder = collect_java_types(node, content);
+            next_local_types = Some(&local_types_holder);
+
             let name_node = node
                 .child_by_field_name("name")
                 .or_else(|| find_child_by_kind(node, "identifier"));
@@ -105,6 +114,16 @@ pub(super) fn traverse_java<'a>(
             }
         }
         "method_declaration" | "constructor_declaration" => {
+            local_types_holder = collect_java_types(node, content);
+            if let Some(parent_types) = local_types {
+                for (k, v) in parent_types {
+                    local_types_holder
+                        .entry(k.clone())
+                        .or_insert_with(|| v.clone());
+                }
+            }
+            next_local_types = Some(&local_types_holder);
+
             let name_node = node
                 .child_by_field_name("name")
                 .or_else(|| find_child_by_kind(node, "identifier"));
@@ -219,7 +238,32 @@ pub(super) fn traverse_java<'a>(
                         .utf8_text(content.as_bytes())
                         .unwrap_or("")
                         .to_string();
-                    calls.push(raw_call(caller, method_name, node));
+                    let mut call = raw_call(caller, method_name, node);
+                    call.call_kind = Some("method".to_string());
+                    call.package_or_namespace = package_name.map(|s| s.to_string());
+
+                    if let Some(object_node) = node.child_by_field_name("object") {
+                        let receiver = object_node
+                            .utf8_text(content.as_bytes())
+                            .unwrap_or("")
+                            .trim()
+                            .to_string();
+                        if !receiver.is_empty() {
+                            call.receiver_expr = Some(receiver.clone());
+                            if let Some(types) = next_local_types {
+                                if let Some(t) = types.get(&receiver) {
+                                    call.receiver_type = Some(t.clone());
+                                    call.import_hint = find_import_hint(t, imports);
+                                }
+                            }
+                            if call.import_hint.is_none() {
+                                if let Some(hint) = find_import_hint(&receiver, imports) {
+                                    call.import_hint = Some(hint);
+                                }
+                            }
+                        }
+                    }
+                    calls.push(call);
                 }
             }
         }
@@ -230,7 +274,12 @@ pub(super) fn traverse_java<'a>(
                         .utf8_text(content.as_bytes())
                         .unwrap_or("")
                         .to_string();
-                    calls.push(raw_call(caller, type_name, node));
+                    let mut call = raw_call(caller, type_name.clone(), node);
+                    call.call_kind = Some("constructor".to_string());
+                    call.receiver_type = Some(type_name.clone());
+                    call.import_hint = find_import_hint(&type_name, imports);
+                    call.package_or_namespace = package_name.map(|s| s.to_string());
+                    calls.push(call);
                 }
             }
         }
@@ -248,6 +297,9 @@ pub(super) fn traverse_java<'a>(
             next_parent_qualified_name,
             next_caller_id,
             next_controller_prefixes,
+            package_name,
+            imports,
+            next_local_types,
         );
     }
 }
@@ -439,5 +491,110 @@ fn combine_paths(prefix: &str, suffix: &str) -> String {
         "/".to_string()
     } else {
         path
+    }
+}
+
+fn find_import_hint(name: &str, imports: &[String]) -> Option<String> {
+    for imp in imports {
+        if imp == name || imp.ends_with(&format!(".{}", name)) {
+            return Some(imp.clone());
+        }
+    }
+    None
+}
+
+fn get_identifier_text(n: tree_sitter::Node, content: &str) -> String {
+    if n.kind() == "identifier" {
+        n.utf8_text(content.as_bytes())
+            .unwrap_or("")
+            .trim()
+            .to_string()
+    } else {
+        if let Some(id_node) = find_child_by_kind(n, "identifier") {
+            id_node
+                .utf8_text(content.as_bytes())
+                .unwrap_or("")
+                .trim()
+                .to_string()
+        } else {
+            let mut cursor = n.walk();
+            for child in n.children(&mut cursor) {
+                let s = get_identifier_text(child, content);
+                if !s.is_empty() {
+                    return s;
+                }
+            }
+            "".to_string()
+        }
+    }
+}
+
+fn collect_java_types(
+    node: tree_sitter::Node,
+    content: &str,
+) -> std::collections::HashMap<String, String> {
+    let mut map = std::collections::HashMap::new();
+    walk_java_types(node, content, &mut map);
+    map
+}
+
+fn walk_java_types(
+    n: tree_sitter::Node,
+    content: &str,
+    map: &mut std::collections::HashMap<String, String>,
+) {
+    let kind = n.kind();
+    match kind {
+        "formal_parameter" => {
+            let type_node = n.child_by_field_name("type");
+            let name_node = n
+                .child_by_field_name("name")
+                .or_else(|| find_child_by_kind(n, "variable_declarator_id"));
+            if let (Some(t), Some(name_id)) = (type_node, name_node) {
+                let type_str = t
+                    .utf8_text(content.as_bytes())
+                    .unwrap_or("")
+                    .trim()
+                    .to_string();
+                let name_str = get_identifier_text(name_id, content);
+                if !name_str.is_empty() && !type_str.is_empty() {
+                    map.insert(name_str, type_str);
+                }
+            }
+        }
+        "local_variable_declaration" | "field_declaration" => {
+            let type_node = n.child_by_field_name("type");
+            if let Some(t) = type_node {
+                let type_str = t
+                    .utf8_text(content.as_bytes())
+                    .unwrap_or("")
+                    .trim()
+                    .to_string();
+                if !type_str.is_empty() {
+                    let mut cursor = n.walk();
+                    for child in n.children(&mut cursor) {
+                        if child.kind() == "variable_declarator" {
+                            if let Some(name_id) = child
+                                .child_by_field_name("name")
+                                .or_else(|| find_child_by_kind(child, "variable_declarator_id"))
+                            {
+                                let name_str = get_identifier_text(name_id, content);
+                                if !name_str.is_empty() {
+                                    map.insert(name_str, type_str.clone());
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        _ => {
+            let mut cursor = n.walk();
+            for child in n.children(&mut cursor) {
+                if child.kind() != "class_declaration" && child.kind() != "interface_declaration" {
+                    walk_java_types(child, content, map);
+                }
+            }
+        }
     }
 }
