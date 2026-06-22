@@ -9,6 +9,15 @@ description: Use the ochna CLI to index, search, explore, and trace code call-gr
 
 Use `ochna` BEFORE resorting to standard tools like `rg` or `view_file`.
 
+**Framework routes**: Java Spring MVC controllers are indexed as `route` nodes.
+`@Controller` / `@RestController` classes combine class-level
+`@RequestMapping` paths with method-level `@GetMapping`, `@PostMapping`,
+`@PutMapping`, `@DeleteMapping`, `@PatchMapping`, and `@RequestMapping`
+annotations. Route nodes are named like `GET /api/users/{id}` or
+`ANY /api/status` and have call edges to their handler methods, so
+`ochna explore "/api"` or `ochna callers <handler>` can reveal HTTP entry
+points as graph nodes.
+
 **Machine-readable output**: every query command accepts a global `--json` flag that emits structured JSON on stdout (full node records with `id`, `qualified_name`, `signature`, line/column spans, plus callers/callees). Diagnostics and progress go to stderr, so `--json` stdout is always clean to parse. Prefer `--json` when consuming output programmatically. Verbosity is controlled by `RUST_LOG` (default `info`).
 
 ## Commands Reference
@@ -89,6 +98,11 @@ For custom queries or advanced analytics directly from the SQLite database:
   uv run python pyscripts/report.py
   ```
   _This runs under Python 3.14 and directly extracts file distributions, symbol counts, and hot call sites using `sqlite3` without invoking the binary._
+- **Regenerate Benchmarks**:
+  ```bash
+  make report
+  ```
+  _Indexes the pinned benchmark submodules, including Spring PetClinic for route coverage, and rewrites `BENCHMARK.md`._
 
 ## Workflow Integration Rules
 

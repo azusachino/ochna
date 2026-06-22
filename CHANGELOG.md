@@ -15,11 +15,21 @@ machine-dependent.
 
 - `CHANGELOG.md` (this file) and a `Re-sync (s)` column in `BENCHMARK.md` /
   `scripts/report.sh` to track per-version indexing performance.
+- Spring MVC route indexing for Java `@Controller` / `@RestController`
+  classes. `@RequestMapping` plus method-level mapping annotations now emit
+  `route` nodes linked to handler methods, with handler-qualified route IDs so
+  duplicate URL patterns across controllers do not collide.
+- `spring-petclinic` benchmark submodule and report row as a real Spring MVC
+  corpus for route-indexing coverage.
+- Scope classification: index-time `is_test` metadata for files/nodes,
+  default library/generated directory exclusion with `init/sync
+  --include-library`, and global query filtering with `--no-tests`.
 
 ### Changed
 
 - Bumped `rusqlite` 0.31 → 0.40 and `tree-sitter` 0.25 → 0.26; switched AST
   traversal to cursor-based child iteration (`node.children(&mut cursor)`).
+- Bumped crate version to `0.0.4`.
 
 ### Performance
 
