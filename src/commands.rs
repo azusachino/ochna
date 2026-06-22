@@ -409,6 +409,15 @@ pub fn run_init(workspace: &Path) -> Result<(), Box<dyn Error>> {
 
     tx.commit()?;
 
+    // A fresh build runs with an in-memory journal and synchronous=OFF, which
+    // leaves free-page slack and fragmentation behind. Compact it once at the
+    // end so the on-disk file matches the logical size and pages pack densely
+    // for better page-cache locality on subsequent queries.
+    if is_fresh_build {
+        info!("Compacting database (VACUUM)...");
+        conn.execute("VACUUM", [])?;
+    }
+
     info!("Indexing completed successfully.");
     info!(
         "  Commit SHA:  {}",

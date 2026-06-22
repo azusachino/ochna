@@ -224,10 +224,12 @@ pub fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
         "CREATE INDEX IF NOT EXISTS idx_nodes_kind ON nodes(kind);",
         [],
     )?;
-    conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_edges_source_id ON edges(source_id);",
-        [],
-    )?;
+    // No index on edges(source_id): the PRIMARY KEY (source_id, target_id, kind)
+    // already serves source_id-prefixed lookups (find_callees, delete-by-source),
+    // so a dedicated index is pure duplication of the text IDs. Drop it from any
+    // pre-existing DB on the next init/sync.
+    conn.execute("DROP INDEX IF EXISTS idx_edges_source_id;", [])?;
+    // find_callers filters on target_id, which the PK can't serve — keep this one.
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_edges_target_id ON edges(target_id);",
         [],
