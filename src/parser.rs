@@ -85,6 +85,7 @@ pub fn parse_code(
             &mut raw_calls,
             None,
             None,
+            None,
         );
     } else if lang == "c" || lang == "cpp" || lang == "c++" || lang == "cc" || lang == "cxx" {
         traverse_c_like(
@@ -579,6 +580,104 @@ public class App {
             .find(|e| e.source_id == main_method.id && e.target_id == run_method.id)
             .unwrap();
         assert_eq!(edge_main_run.kind, "calls");
+    }
+
+    #[test]
+    fn test_parse_spring_routes() {
+        let java_code = r#"
+@RestController
+@RequestMapping(value = "/api/v2")
+public class UserController {
+    @GetMapping("/users/{id}")
+    public User getUser(@PathVariable String id) {
+        return null;
+    }
+
+    @PostMapping(path = {"/users", "/create"})
+    public User createUser() {
+        return null;
+    }
+
+    @RequestMapping(value = "/status", method = RequestMethod.POST)
+    public String getStatus() {
+        return "OK";
+    }
+}
+"#;
+
+        let (nodes, calls) = parse_code("src/UserController.java", java_code, "java").unwrap();
+
+        let class_node = nodes
+            .iter()
+            .find(|n| n.name == "UserController" && n.kind == "class")
+            .unwrap();
+        assert_eq!(class_node.id, "src/UserController.java::UserController");
+
+        let get_user = nodes
+            .iter()
+            .find(|n| n.name == "getUser" && n.kind == "method")
+            .unwrap();
+        let create_user = nodes
+            .iter()
+            .find(|n| n.name == "createUser" && n.kind == "method")
+            .unwrap();
+        let get_status = nodes
+            .iter()
+            .find(|n| n.name == "getStatus" && n.kind == "method")
+            .unwrap();
+
+        let route_get = nodes
+            .iter()
+            .find(|n| n.id == "route:GET:/api/v2/users/{id}")
+            .unwrap();
+        assert_eq!(route_get.name, "GET /api/v2/users/{id}");
+        assert_eq!(route_get.kind, "route");
+        assert_eq!(
+            route_get.qualified_name.as_deref(),
+            Some("GET /api/v2/users/{id}")
+        );
+
+        let route_create1 = nodes
+            .iter()
+            .find(|n| n.id == "route:POST:/api/v2/users")
+            .unwrap();
+        assert_eq!(route_create1.name, "POST /api/v2/users");
+
+        let route_create2 = nodes
+            .iter()
+            .find(|n| n.id == "route:POST:/api/v2/create")
+            .unwrap();
+        assert_eq!(route_create2.name, "POST /api/v2/create");
+
+        let route_status = nodes
+            .iter()
+            .find(|n| n.id == "route:POST:/api/v2/status")
+            .unwrap();
+        assert_eq!(route_status.name, "POST /api/v2/status");
+
+        let edges = resolve_calls_local(&nodes, &calls);
+
+        let edge_get = edges.iter().find(|e| e.source_id == route_get.id).unwrap();
+        assert_eq!(edge_get.target_id, get_user.id);
+        assert_eq!(edge_get.kind, "calls");
+
+        let edge_create1 = edges
+            .iter()
+            .find(|e| e.source_id == route_create1.id)
+            .unwrap();
+        assert_eq!(edge_create1.target_id, create_user.id);
+
+        let edge_create2 = edges
+            .iter()
+            .find(|e| e.source_id == route_create2.id)
+            .unwrap();
+        assert_eq!(edge_create2.target_id, create_user.id);
+
+        let edge_status = edges
+            .iter()
+            .find(|e| e.source_id == route_status.id)
+            .unwrap();
+        assert_eq!(edge_status.target_id, get_status.id);
     }
 
     #[test]
