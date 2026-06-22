@@ -84,49 +84,14 @@ fn split_callee_name(callee_name: &str) -> (Option<String>, String) {
 /// compatible; `init_schema` then drops the data tables and the caller rebuilds.
 const SCHEMA_VERSION: i64 = 2;
 
-/// Initialize the SQLite database schema.
-/// Enforces foreign key constraints and creates all necessary tables,
-/// indexes, the FTS5 virtual table, and the update/delete/insert triggers.
-pub fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
-    // Enable foreign keys
-    conn.execute("PRAGMA foreign_keys = ON;", [])?;
-
-    // Create tables
-    conn.execute(
-        "CREATE TABLE IF NOT EXISTS schema_versions (
-            version INTEGER PRIMARY KEY,
-            applied_at INTEGER NOT NULL DEFAULT (strftime('%s','now'))
-         )",
-        [],
-    )?;
-
-    // Schema v2 interns node identity to an integer surrogate (`nid`) and stores
-    // it on edges/raw_calls/unresolved_refs instead of the long text `id`. The
-    // graph is fully re-derivable from source, so an older DB is migrated by
-    // dropping the data tables and letting the caller rebuild — no fragile
-    // in-place column rewrite. Children first, then the parent `nodes`.
-    let current_version: Option<i64> =
-        conn.query_row("SELECT MAX(version) FROM schema_versions", [], |row| {
-            row.get(0)
-        })?;
-    if matches!(current_version, Some(v) if v < SCHEMA_VERSION) {
-        for table in [
-            "edges",
-            "raw_calls",
-            "unresolved_refs",
-            "nodes_fts",
-            "nodes",
-        ] {
-            conn.execute(&format!("DROP TABLE IF EXISTS {table}"), [])?;
-        }
-        conn.execute("DELETE FROM schema_versions", [])?;
-    }
-
+/// Single source of truth for every piece of schema DDL. `init_schema`, the
+/// migration step, and the FTS trigger toggles all reference these constants so
+/// table/index/trigger definitions live in exactly one place.
+mod schema {
     // `nid` aliases rowid (the compact surrogate referenced by every edge/call);
     // `id` keeps the human-readable "file::symbol" key, UNIQUE so resolution and
     // upserts can still look a node up by string.
-    conn.execute(
-        "CREATE TABLE IF NOT EXISTS nodes (
+    const NODES: &str = "CREATE TABLE IF NOT EXISTS nodes (
             nid INTEGER PRIMARY KEY,
             id TEXT NOT NULL UNIQUE,
             name TEXT NOT NULL,
@@ -139,37 +104,28 @@ pub fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
             end_column INTEGER NOT NULL,
             signature TEXT,
             doc_comment TEXT
-         )",
-        [],
-    )?;
+         )";
 
     // WITHOUT ROWID folds the (source_nid, target_nid, kind) primary key into the
     // table b-tree, so there is no separate PK autoindex duplicating the keys.
-    conn.execute(
-        "CREATE TABLE IF NOT EXISTS edges (
+    const EDGES: &str = "CREATE TABLE IF NOT EXISTS edges (
             source_nid INTEGER NOT NULL,
             target_nid INTEGER NOT NULL,
             kind TEXT NOT NULL,
             PRIMARY KEY (source_nid, target_nid, kind),
             FOREIGN KEY (source_nid) REFERENCES nodes(nid) ON DELETE CASCADE,
             FOREIGN KEY (target_nid) REFERENCES nodes(nid) ON DELETE CASCADE
-         ) WITHOUT ROWID",
-        [],
-    )?;
+         ) WITHOUT ROWID";
 
-    conn.execute(
-        "CREATE TABLE IF NOT EXISTS files (
+    const FILES: &str = "CREATE TABLE IF NOT EXISTS files (
             file_path TEXT PRIMARY KEY,
             content_hash TEXT NOT NULL,
             language TEXT,
             size_bytes INTEGER,
             last_modified INTEGER
-         )",
-        [],
-    )?;
+         )";
 
-    conn.execute(
-        "CREATE TABLE IF NOT EXISTS unresolved_refs (
+    const UNRESOLVED_REFS: &str = "CREATE TABLE IF NOT EXISTS unresolved_refs (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             source_nid INTEGER NOT NULL,
             specifier TEXT NOT NULL,
@@ -177,12 +133,9 @@ pub fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
             line INTEGER NOT NULL,
             column INTEGER NOT NULL,
             FOREIGN KEY (source_nid) REFERENCES nodes(nid) ON DELETE CASCADE
-         )",
-        [],
-    )?;
+         )";
 
-    conn.execute(
-        "CREATE TABLE IF NOT EXISTS raw_calls (
+    const RAW_CALLS: &str = "CREATE TABLE IF NOT EXISTS raw_calls (
             caller_nid INTEGER NOT NULL,
             callee_name TEXT NOT NULL,
             callee_simple TEXT,
@@ -190,63 +143,106 @@ pub fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
             line INTEGER NOT NULL,
             column INTEGER NOT NULL,
             FOREIGN KEY (caller_nid) REFERENCES nodes(nid) ON DELETE CASCADE
-         )",
-        [],
-    )?;
+         )";
 
-    conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_raw_calls_caller_nid ON raw_calls(caller_nid)",
-        [],
-    )?;
-    conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_raw_calls_callee_simple ON raw_calls(callee_simple)",
-        [],
-    )?;
-
-    conn.execute(
-        "CREATE TABLE IF NOT EXISTS project_metadata (
+    const PROJECT_METADATA: &str = "CREATE TABLE IF NOT EXISTS project_metadata (
             key TEXT PRIMARY KEY,
             value TEXT
-         )",
-        [],
-    )?;
+         )";
 
-    // FTS5 Virtual Table for nodes
-    conn.execute(
-        "CREATE VIRTUAL TABLE IF NOT EXISTS nodes_fts USING fts5(
+    /// Bootstrapped on its own ahead of the migration step, which reads it.
+    pub const SCHEMA_VERSIONS: &str = "CREATE TABLE IF NOT EXISTS schema_versions (
+            version INTEGER PRIMARY KEY,
+            applied_at INTEGER NOT NULL DEFAULT (strftime('%s','now'))
+         )";
+
+    /// Data tables created after migration (`nodes` first; children reference it).
+    pub const TABLES: &[&str] = &[
+        NODES,
+        EDGES,
+        FILES,
+        UNRESOLVED_REFS,
+        RAW_CALLS,
+        PROJECT_METADATA,
+    ];
+
+    pub const FTS_TABLE: &str = "CREATE VIRTUAL TABLE IF NOT EXISTS nodes_fts USING fts5(
             name,
             qualified_name,
             signature,
             doc_comment,
             content='nodes',
             content_rowid='rowid'
-         )",
-        [],
-    )?;
+         )";
 
-    create_node_fts_triggers(conn)?;
-
-    // Indexes for query performance optimization
-    conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_nodes_file_path ON nodes(file_path);",
-        [],
-    )?;
-    conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_nodes_name ON nodes(name);",
-        [],
-    )?;
-    conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_nodes_kind ON nodes(kind);",
-        [],
-    )?;
     // No index on edges(source_nid): the PRIMARY KEY (source_nid, target_nid,
     // kind) already serves source-prefixed lookups (find_callees, delete-by-
     // source). find_callers filters on target_nid, which the PK can't serve, so
-    // this reverse index is the one we keep.
-    conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_edges_target_nid ON edges(target_nid);",
-        [],
-    )?;
+    // that reverse index is the one we keep.
+    pub const INDEXES: &[&str] = &[
+        "CREATE INDEX IF NOT EXISTS idx_raw_calls_caller_nid ON raw_calls(caller_nid)",
+        "CREATE INDEX IF NOT EXISTS idx_raw_calls_callee_simple ON raw_calls(callee_simple)",
+        "CREATE INDEX IF NOT EXISTS idx_nodes_file_path ON nodes(file_path)",
+        "CREATE INDEX IF NOT EXISTS idx_nodes_name ON nodes(name)",
+        "CREATE INDEX IF NOT EXISTS idx_nodes_kind ON nodes(kind)",
+        "CREATE INDEX IF NOT EXISTS idx_edges_target_nid ON edges(target_nid)",
+    ];
+
+    /// FTS sync triggers as (name, DDL) so create and drop share one definition.
+    pub const FTS_TRIGGERS: &[(&str, &str)] = &[
+        (
+            "nodes_ai",
+            "CREATE TRIGGER IF NOT EXISTS nodes_ai AFTER INSERT ON nodes BEGIN
+                INSERT INTO nodes_fts(rowid, name, qualified_name, signature, doc_comment)
+                VALUES (new.rowid, new.name, new.qualified_name, new.signature, new.doc_comment);
+             END;",
+        ),
+        (
+            "nodes_ad",
+            "CREATE TRIGGER IF NOT EXISTS nodes_ad AFTER DELETE ON nodes BEGIN
+                INSERT INTO nodes_fts(nodes_fts, rowid, name, qualified_name, signature, doc_comment)
+                VALUES ('delete', old.rowid, old.name, old.qualified_name, old.signature, old.doc_comment);
+             END;",
+        ),
+        (
+            "nodes_au",
+            "CREATE TRIGGER IF NOT EXISTS nodes_au AFTER UPDATE ON nodes BEGIN
+                INSERT INTO nodes_fts(nodes_fts, rowid, name, qualified_name, signature, doc_comment)
+                VALUES ('delete', old.rowid, old.name, old.qualified_name, old.signature, old.doc_comment);
+                INSERT INTO nodes_fts(rowid, name, qualified_name, signature, doc_comment)
+                VALUES (new.rowid, new.name, new.qualified_name, new.signature, new.doc_comment);
+             END;",
+        ),
+    ];
+
+    /// Data tables dropped (children first) on a non-backward-compatible migration.
+    pub const MIGRATION_DROP: &[&str] = &[
+        "edges",
+        "raw_calls",
+        "unresolved_refs",
+        "nodes_fts",
+        "nodes",
+    ];
+}
+
+/// Initialize the SQLite database schema.
+/// Enforces foreign key constraints and creates all necessary tables,
+/// indexes, the FTS5 virtual table, and the update/delete/insert triggers.
+pub fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
+    conn.execute("PRAGMA foreign_keys = ON;", [])?;
+
+    // schema_versions must exist before the migration step can read it.
+    conn.execute(schema::SCHEMA_VERSIONS, [])?;
+    run_migration(conn)?;
+
+    for ddl in schema::TABLES {
+        conn.execute(ddl, [])?;
+    }
+    conn.execute(schema::FTS_TABLE, [])?;
+    create_node_fts_triggers(conn)?;
+    for ddl in schema::INDEXES {
+        conn.execute(ddl, [])?;
+    }
 
     conn.execute(
         "INSERT OR IGNORE INTO schema_versions (version) VALUES (?1)",
@@ -256,42 +252,37 @@ pub fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
     Ok(())
 }
 
+/// Schema v2 interns node identity to an integer surrogate (`nid`) stored on
+/// edges/raw_calls/unresolved_refs instead of the long text `id`. The graph is
+/// re-derivable from source, so an older DB is migrated by dropping the data
+/// tables and letting the caller rebuild — no fragile in-place column rewrite.
+fn run_migration(conn: &Connection) -> rusqlite::Result<()> {
+    let current_version: Option<i64> =
+        conn.query_row("SELECT MAX(version) FROM schema_versions", [], |row| {
+            row.get(0)
+        })?;
+    if matches!(current_version, Some(v) if v < SCHEMA_VERSION) {
+        for table in schema::MIGRATION_DROP {
+            conn.execute(&format!("DROP TABLE IF EXISTS {table}"), [])?;
+        }
+        conn.execute("DELETE FROM schema_versions", [])?;
+    }
+    Ok(())
+}
+
 /// Create triggers that keep the external-content FTS table synchronized with nodes.
 pub fn create_node_fts_triggers(conn: &Connection) -> rusqlite::Result<()> {
-    conn.execute(
-        "CREATE TRIGGER IF NOT EXISTS nodes_ai AFTER INSERT ON nodes BEGIN
-            INSERT INTO nodes_fts(rowid, name, qualified_name, signature, doc_comment)
-            VALUES (new.rowid, new.name, new.qualified_name, new.signature, new.doc_comment);
-         END;",
-        [],
-    )?;
-
-    conn.execute(
-        "CREATE TRIGGER IF NOT EXISTS nodes_ad AFTER DELETE ON nodes BEGIN
-            INSERT INTO nodes_fts(nodes_fts, rowid, name, qualified_name, signature, doc_comment)
-            VALUES ('delete', old.rowid, old.name, old.qualified_name, old.signature, old.doc_comment);
-         END;",
-        [],
-    )?;
-
-    conn.execute(
-        "CREATE TRIGGER IF NOT EXISTS nodes_au AFTER UPDATE ON nodes BEGIN
-            INSERT INTO nodes_fts(nodes_fts, rowid, name, qualified_name, signature, doc_comment)
-            VALUES ('delete', old.rowid, old.name, old.qualified_name, old.signature, old.doc_comment);
-            INSERT INTO nodes_fts(rowid, name, qualified_name, signature, doc_comment)
-            VALUES (new.rowid, new.name, new.qualified_name, new.signature, new.doc_comment);
-         END;",
-        [],
-    )?;
-
+    for (_, ddl) in schema::FTS_TRIGGERS {
+        conn.execute(ddl, [])?;
+    }
     Ok(())
 }
 
 /// Drop node FTS maintenance triggers so fresh builds can bulk-load nodes cheaply.
 pub fn drop_node_fts_triggers(conn: &Connection) -> rusqlite::Result<()> {
-    conn.execute("DROP TRIGGER IF EXISTS nodes_ai", [])?;
-    conn.execute("DROP TRIGGER IF EXISTS nodes_ad", [])?;
-    conn.execute("DROP TRIGGER IF EXISTS nodes_au", [])?;
+    for (name, _) in schema::FTS_TRIGGERS {
+        conn.execute(&format!("DROP TRIGGER IF EXISTS {name}"), [])?;
+    }
     Ok(())
 }
 
