@@ -109,10 +109,52 @@ def extract_added_test_symbols(files: list[dict[str, Any]]) -> set[str]:
     names: set[str] = set()
     for file in files:
         patch = file.get("patch") or ""
+        has_test_annotation = False
         for line in patch.splitlines():
-            match = re.match(r"^\+\s*func\s+(Test[A-Za-z0-9_]+)\s*\(", line)
-            if match:
-                names.add(match.group(1))
+            if line.startswith("+"):
+                stripped = line[1:].strip()
+                if not stripped:
+                    continue
+                if stripped.startswith("@Test") or stripped.startswith("@ParameterizedTest") or stripped.startswith("@RepeatedTest"):
+                    has_test_annotation = True
+                    continue
+                if stripped.startswith("@"):
+                    # keep annotation flag across other annotations
+                    continue
+                if stripped.startswith("//") or stripped.startswith("/*") or stripped.startswith("*"):
+                    # ignore comments
+                    continue
+
+                # Go: func TestXxx(
+                go_match = re.match(r"^func\s+(Test[A-Za-z0-9_]+)\s*\(", stripped)
+                if go_match:
+                    names.add(go_match.group(1))
+                    has_test_annotation = False
+                    continue
+
+                # Python: def test_xxx(
+                py_match = re.match(r"^def\s+(test_[A-Za-z0-9_]+)\s*\(", stripped)
+                if py_match:
+                    names.add(py_match.group(1))
+                    has_test_annotation = False
+                    continue
+
+                # Java: if we saw a @Test annotation, extract the method name
+                if has_test_annotation:
+                    java_match = re.search(r"\b([A-Za-z0-9_]+)\s*\(", stripped)
+                    if java_match:
+                        names.add(java_match.group(1))
+                    has_test_annotation = False
+                    continue
+
+                # Java fallback without annotation: methods starting with test...
+                java_fallback = re.match(r"^(?:public\s+|protected\s+|private\s+)?(?:static\s+)?void\s+(test[A-Za-z0-9_]+)\s*\(", stripped)
+                if java_fallback:
+                    names.add(java_fallback.group(1))
+                    continue
+            else:
+                if line.strip() != "":
+                    has_test_annotation = False
     return names
 
 
