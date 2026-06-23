@@ -163,6 +163,8 @@ pub(super) fn push_symbol(
         signature: Some(get_signature(node, content)),
         doc_comment: get_doc_comment(node, content),
         is_test: false,
+        resolution_kind: None,
+        confidence: None,
     });
 }
 

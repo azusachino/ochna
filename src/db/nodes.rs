@@ -1,6 +1,6 @@
 //! Node CRUD, dynamic queries, full-text search, and call-graph traversal.
 
-use super::{map_row_to_node, Node};
+use super::{confidence_for_kind, label_for_kind, map_row_to_node, Node};
 use rusqlite::Connection;
 
 /// Upsert a node into the database (INSERT OR REPLACE)
@@ -113,7 +113,7 @@ pub fn find_callers(
         let mut stmt = conn.prepare(
             "SELECT n.id, n.name, n.kind, n.qualified_name, n.file_path, \
                     n.start_line, n.end_line, n.start_column, n.end_column, \
-                    n.signature, n.doc_comment, n.is_test \
+                    n.signature, n.doc_comment, n.is_test, e.resolution_kind \
              FROM nodes n \
              JOIN edges e ON n.nid = e.source_nid \
              WHERE e.target_nid = (SELECT nid FROM nodes WHERE id = ?) AND e.kind = ?",
@@ -121,14 +121,18 @@ pub fn find_callers(
         let mut rows = stmt.query([target_id, kind])?;
         let mut nodes = Vec::new();
         while let Some(row) = rows.next()? {
-            nodes.push(map_row_to_node(row)?);
+            let mut node = map_row_to_node(row)?;
+            let res_kind: i64 = row.get(12)?;
+            node.resolution_kind = Some(label_for_kind(res_kind).to_string());
+            node.confidence = Some(confidence_for_kind(res_kind));
+            nodes.push(node);
         }
         Ok(nodes)
     } else {
         let mut stmt = conn.prepare(
             "SELECT n.id, n.name, n.kind, n.qualified_name, n.file_path, \
                     n.start_line, n.end_line, n.start_column, n.end_column, \
-                    n.signature, n.doc_comment, n.is_test \
+                    n.signature, n.doc_comment, n.is_test, e.resolution_kind \
              FROM nodes n \
              JOIN edges e ON n.nid = e.source_nid \
              WHERE e.target_nid = (SELECT nid FROM nodes WHERE id = ?)",
@@ -136,7 +140,11 @@ pub fn find_callers(
         let mut rows = stmt.query([target_id])?;
         let mut nodes = Vec::new();
         while let Some(row) = rows.next()? {
-            nodes.push(map_row_to_node(row)?);
+            let mut node = map_row_to_node(row)?;
+            let res_kind: i64 = row.get(12)?;
+            node.resolution_kind = Some(label_for_kind(res_kind).to_string());
+            node.confidence = Some(confidence_for_kind(res_kind));
+            nodes.push(node);
         }
         Ok(nodes)
     }
@@ -152,7 +160,7 @@ pub fn find_callees(
         let mut stmt = conn.prepare(
             "SELECT n.id, n.name, n.kind, n.qualified_name, n.file_path, \
                     n.start_line, n.end_line, n.start_column, n.end_column, \
-                    n.signature, n.doc_comment, n.is_test \
+                    n.signature, n.doc_comment, n.is_test, e.resolution_kind \
              FROM nodes n \
              JOIN edges e ON n.nid = e.target_nid \
              WHERE e.source_nid = (SELECT nid FROM nodes WHERE id = ?) AND e.kind = ?",
@@ -160,14 +168,18 @@ pub fn find_callees(
         let mut rows = stmt.query([source_id, kind])?;
         let mut nodes = Vec::new();
         while let Some(row) = rows.next()? {
-            nodes.push(map_row_to_node(row)?);
+            let mut node = map_row_to_node(row)?;
+            let res_kind: i64 = row.get(12)?;
+            node.resolution_kind = Some(label_for_kind(res_kind).to_string());
+            node.confidence = Some(confidence_for_kind(res_kind));
+            nodes.push(node);
         }
         Ok(nodes)
     } else {
         let mut stmt = conn.prepare(
             "SELECT n.id, n.name, n.kind, n.qualified_name, n.file_path, \
                     n.start_line, n.end_line, n.start_column, n.end_column, \
-                    n.signature, n.doc_comment, n.is_test \
+                    n.signature, n.doc_comment, n.is_test, e.resolution_kind \
              FROM nodes n \
              JOIN edges e ON n.nid = e.target_nid \
              WHERE e.source_nid = (SELECT nid FROM nodes WHERE id = ?)",
@@ -175,7 +187,11 @@ pub fn find_callees(
         let mut rows = stmt.query([source_id])?;
         let mut nodes = Vec::new();
         while let Some(row) = rows.next()? {
-            nodes.push(map_row_to_node(row)?);
+            let mut node = map_row_to_node(row)?;
+            let res_kind: i64 = row.get(12)?;
+            node.resolution_kind = Some(label_for_kind(res_kind).to_string());
+            node.confidence = Some(confidence_for_kind(res_kind));
+            nodes.push(node);
         }
         Ok(nodes)
     }

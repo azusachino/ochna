@@ -49,6 +49,8 @@ pub(super) fn traverse_java<'a>(
                     .to_string();
                 let qname = if let Some(parent_qname) = current_parent_qualified_name {
                     format!("{}::{}", parent_qname, name)
+                } else if let Some(pkg) = package_name {
+                    format!("{}::{}", pkg, name)
                 } else {
                     name.clone()
                 };
@@ -77,6 +79,8 @@ pub(super) fn traverse_java<'a>(
                     signature: Some(sig),
                     doc_comment: doc,
                     is_test: false,
+                    resolution_kind: None,
+                    confidence: None,
                 });
 
                 qname_holder = qname;
@@ -162,6 +166,8 @@ pub(super) fn traverse_java<'a>(
                     signature: Some(sig.clone()),
                     doc_comment: doc.clone(),
                     is_test: false,
+                    resolution_kind: None,
+                    confidence: None,
                 });
 
                 id_holder = id;
@@ -217,6 +223,8 @@ pub(super) fn traverse_java<'a>(
                                                 signature: Some(sig.clone()),
                                                 doc_comment: doc.clone(),
                                                 is_test: false,
+                                                resolution_kind: None,
+                                                confidence: None,
                                             });
 
                                             // Raw call linking the route node (as caller) to the method (as callee)

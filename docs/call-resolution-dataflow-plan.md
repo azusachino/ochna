@@ -31,305 +31,33 @@ This plan keeps the current successful properties:
 - JSON query output;
 - language support that can grow one parser at a time.
 
+
 ## Evidence From Recent Corpus Runs
 
-These findings came from using the installed `ochna` binary against the checked-out benchmark submodules. All three corpora were shallow enough that local parent history was missing, so the reliable workflow was:
+Full write-ups live in `docs/experiments/` and the asobi project log; this is the
+distilled signal. All runs used the installed `ochna` binary against the
+benchmark submodules. The submodules are shallow to a single commit, so local
+parent diffs are unavailable. The reliable workflow was:
 
-1. verify the local ochna index with `ochna status --json`;
-2. use local `git log --oneline -1` only to identify the current commit/PR;
-3. use `gh api` for PR or commit metadata and patch files;
+1. verify the local index with `ochna status --json`;
+2. use `git log --oneline -1` only to identify the current commit/PR;
+3. use `gh api` for PR/commit metadata and patch files;
 4. use ochna for current-tree symbols, line spans, callers, and callees.
 
-### Kubernetes
+| Corpus | Change | What ochna did well | Where it fell short | Root cause |
+| --- | --- | --- | --- | --- |
+| Kubernetes (PR 139848) | watch-cache test rewrite | located exact symbols (`ShouldDelegateList`, `GetExactSnapshotLocked`, the new tests) | broad callees of a big Go test mixed in unrelated `Run`/`Add`/`Stop`/`GetList` | Go selector calls store only the field name, not the receiver expr/type |
+| Netty (PR 16959) | traffic-shaping write leak fix | `callers releaseAndFailQueuedWrite` returned exactly the 3 `handlerRemoved` cleanups | overloaded/common Java method names still fan out at scale | name-only fallback is accurate only when the name is distinctive |
+| Linux (`strncpy` removal) | core API + arch impls deleted | confirmed `strncpy` gone from `lib/string.c`/`string.h`/FORTIFY while `strncpy_from_user` etc. remain | could not *explain* the removal from a symbol graph alone | current index models only the current tree; no prior tree / removed symbols |
+
+See `docs/experiments/kubernetes-pr-139848.md` for the full Kubernetes trace;
+the Netty and Linux runs are recorded in the project log.
+
+The Netty `callers` result is the positive model for this redesign: when names
+are distinctive and ownership is clear, ochna already behaves like a strong
+structural graph. The goal is to make common-named calls behave like that case,
+and to be honest when they can't.
 
-PR `kubernetes/kubernetes#139848` rewrote apiserver watch-cache tests to use real snapshots.
-
-Local index state:
-
-```json
-{
-  "files": 12890,
-  "nodes": 122380,
-  "edges": 339798,
-  "git": {
-    "branch": "master",
-    "commit_sha": "b58546d7b34d0217171dd0d36a6e60c2eb603a77",
-    "commit_subject": "Merge pull request #139848 from serathius/watchcache-rewrite-should-delegate-list",
-    "status": "dirty"
-  }
-}
-```
-
-The submodule was shallow to the merge commit:
-
-```bash
-git rev-list --parents -n 1 HEAD
-# b58546d7b34d0217171dd0d36a6e60c2eb603a77
-```
-
-That meant `git log --merges` and local parent diffs were not useful. The PR number in the merge subject was the right bridge to GitHub metadata:
-
-```bash
-gh api repos/kubernetes/kubernetes/pulls/139848
-gh api repos/kubernetes/kubernetes/pulls/139848/files --paginate
-```
-
-PR metadata:
-
-- title: `cacher: rewrite whitebox fallback tests to use real snapshots`;
-- labels: `kind/cleanup`, `area/apiserver`, `sig/api-machinery`, `size/L`, `release-note-none`;
-- milestone: `v1.37`;
-- release note: `NONE`;
-- merged at: `2026-06-19T11:06:43Z`;
-- changed files:
-  - `staging/src/k8s.io/apiserver/pkg/storage/cacher/cacher_whitebox_test.go` (`+47/-107`);
-  - `staging/src/k8s.io/apiserver/pkg/storage/cacher/watch_cache_storage_test.go` (`+65/-0`).
-
-What worked:
-
-- `ochna node --file ... --symbols-only --json` found `TestShouldDelegateList`, `TestMatchExactResourceVersionFallback`, and `TestWatchCacheStorageMatchExactResourceVersionFallback`.
-- `ochna node --symbol ShouldDelegateList --include-code --json` and `ochna node --symbol GetExactSnapshotLocked --include-code --json` quickly showed the production logic.
-
-What failed:
-
-- `ochna node --symbol TestShouldDelegateList --include-code --json` reported callees with common names from unrelated packages because many Go methods share names like `Run`, `Add`, `Fatal`, and `Stop`.
-- The user-visible workaround was to anchor on changed files and exact production symbols instead of trusting broad callees.
-
-Root cause:
-
-- Go selector calls currently store only the field name, e.g. `GetList`, not the receiver expression or inferred receiver type.
-
-Detailed behavior:
-
-- `TestShouldDelegateList` now creates real `example.Pod` values and drives the watch cache with `cacher.watchCache.Add(oldPod)` and `cacher.watchCache.Update(latestPod)` instead of injecting fake snapshots through `cacher.watchCache.storage.snapshots`.
-- `TestMatchExactResourceVersionFallback` no longer uses a fake snapshotter table. It tests `SnapshotAvailable=false` and `SnapshotAvailable=true` through `NewCacheDelegator(...).GetList(...)`.
-- The new `TestWatchCacheStorageMatchExactResourceVersionFallback` directly verifies `watchCacheStorage.GetExactSnapshotLocked`:
-  - no snapshot returns `ResourceExpired`;
-  - adding RV 20 makes RV 20 retrievable;
-  - compacting to RV 30 expires RV 20;
-  - RV 30 remains retrievable.
-
-Ochna was good at locating these exact symbols. It was weaker when asked for broad callees from a large Go test because raw call data did not know that `cacher.watchCache.Add` was not every `Add` in the repository.
-
-### Linux
-
-Merge `1a3746ccb` removed core kernel `strncpy()`.
-
-Local index state:
-
-```json
-{
-  "files": 65221,
-  "nodes": 1403920,
-  "edges": 2314240,
-  "git": {
-    "branch": "master",
-    "commit_sha": "1a3746ccbb0a97bed3c06ccde6b880013b1dddc1",
-    "commit_subject": "Merge tag 'strncpy-removal-v7.2-rc1' of git://git.kernel.org/pub/scm/linux/kernel/git/kees/linux",
-    "status": "dirty"
-  }
-}
-```
-
-The submodule was also shallow to one commit:
-
-```bash
-git rev-list --parents -n 1 HEAD
-# 1a3746ccbb0a97bed3c06ccde6b880013b1dddc1
-```
-
-Unlike Kubernetes/Netty, this was not PR-shaped. The correct metadata source was the GitHub commit API:
-
-```bash
-gh api repos/torvalds/linux/commits/1a3746ccbb0a97bed3c06ccde6b880013b1dddc1
-```
-
-Commit metadata:
-
-- subject: `Merge tag 'strncpy-removal-v7.2-rc1'`;
-- author date: `2026-06-19T21:56:45Z`;
-- files changed: `19`;
-- message summary:
-  - remove per-arch `strncpy` implementations in alpha, m68k, powerpc, x86, and xtensa;
-  - remove `strncpy` API;
-  - close out a six-year migration effort across hundreds of commits.
-
-What worked:
-
-- `ochna search strncpy --json` showed that core `lib/string.c::strncpy` and `include/linux/string.h::strncpy` were absent after the merge.
-- It still found distinct APIs such as `strncpy_from_user`, which correctly remain.
-
-What failed or needed external data:
-
-- The most important changes were deletions of declarations, implementations, FORTIFY wrappers, and assembly implementations. A symbol graph alone cannot explain a removed symbol without patch metadata or a previous index.
-
-Root cause:
-
-- Current index represents the current tree. It does not compare against a prior tree or store removed symbols.
-
-Detailed patch findings:
-
-- `Documentation/process/deprecated.rst` changed from warning about `strncpy()` to stating that `strncpy()` has been removed from the kernel.
-- Replacement guidance now points to:
-  - `strscpy()` for NUL-terminated destinations;
-  - `strscpy_pad()` for NUL-terminated and zero-padded destinations;
-  - `memtostr()` / `memtostr_pad()` for fixed-width non-NUL source data;
-  - `strtomem()` / `strtomem_pad()` for fixed-width non-NUL destinations;
-  - `memcpy_and_pad()` for bounded runtime-size padded copies.
-- `include/linux/string.h` removed the `extern char *strncpy(...)` declaration.
-- `lib/string.c` removed the `strncpy` implementation and `EXPORT_SYMBOL(strncpy)`.
-- `include/linux/fortify-string.h` removed:
-  - `FORTIFY_FUNC(strncpy)`;
-  - `__underlying_strncpy`;
-  - the FORTIFY inline `strncpy` wrapper and its documentation;
-  - the final `#undef __underlying_strncpy`.
-- `lib/tests/fortify_kunit.c` removed `fortify_test_strncpy` and dropped it from `fortify_test_cases`.
-- Two focused fortify test files were removed:
-  - `lib/test_fortify/write_overflow-strncpy-src.c`;
-  - `lib/test_fortify/write_overflow-strncpy.c`.
-- Several architecture files removed declarations or implementations:
-  - `arch/alpha/lib/strncpy.S` removed entirely;
-  - alpha, m68k, powerpc, x86, and xtensa string headers / assembly no longer expose arch-specific `strncpy`.
-
-Ochna helped after the patch was known:
-
-```bash
-ochna search strncpy --json
-ochna node --file lib/string.c --symbols-only --json
-ochna node --file include/linux/string.h --symbols-only --json
-ochna node --file include/linux/fortify-string.h --symbols-only --json
-ochna node --file lib/tests/fortify_kunit.c --symbols-only --json
-```
-
-The important distinction was that `strncpy` itself was gone from the kernel API, while related but different APIs remained:
-
-- `strncpy_from_user`;
-- `strncpy_from_kernel_nofault`;
-- `strncpy_from_user_nofault`;
-- `tools/include/nolibc/string.h::strncpy`;
-- helper names like `safe_strncpy`.
-
-This is a good example of why deletion-heavy explanations need either patch metadata or two index snapshots. A current-tree graph cannot tell the story alone.
-
-### Netty
-
-PR `netty/netty#16959` fixed queued traffic-shaping writes leaking and leaving promises incomplete on close.
-
-Local index state:
-
-```json
-{
-  "files": 3561,
-  "nodes": 41087,
-  "edges": 104893,
-  "git": {
-    "branch": "4.2",
-    "commit_sha": "ec4efdbbeebf024b64e0fb782184989835c9ab92",
-    "commit_subject": "Correctly release and fail queued traffic-shaping writes on close (#16959)",
-    "status": "dirty"
-  }
-}
-```
-
-The submodule was shallow to the PR merge commit:
-
-```bash
-git rev-list --parents -n 1 HEAD
-# ec4efdbbeebf024b64e0fb782184989835c9ab92
-```
-
-The commit subject carried the PR number, so metadata came from:
-
-```bash
-gh api repos/netty/netty/pulls/16959
-gh api repos/netty/netty/pulls/16959/files --paginate
-```
-
-PR metadata:
-
-- title: `Correctly release and fail queued traffic-shaping writes on close`;
-- base branch: `4.2`;
-- merged at: `2026-06-18T16:09:27Z`;
-- changed files:
-  - `handler/src/main/java/io/netty/handler/traffic/AbstractTrafficShapingHandler.java` (`+9/-0`);
-  - `handler/src/main/java/io/netty/handler/traffic/ChannelTrafficShapingHandler.java` (`+5/-5`);
-  - `handler/src/main/java/io/netty/handler/traffic/GlobalChannelTrafficShapingHandler.java` (`+5/-5`);
-  - `handler/src/main/java/io/netty/handler/traffic/GlobalTrafficShapingHandler.java` (`+5/-5`);
-  - `handler/src/test/java/io/netty/handler/traffic/TrafficShapingHandlerTest.java` (`+49/-0`).
-
-What worked very well:
-
-- `ochna node --symbol releaseAndFailQueuedWrite --include-code --json` found the new helper.
-- `ochna callers releaseAndFailQueuedWrite --json` found exactly the three handler cleanup callers.
-- `ochna node --symbol testQueuedWritesReleasedAndFailedOnClose --include-code --json` found the new regression test.
-
-Why Java was better:
-
-- Java class and method nodes already carry useful `qualified_name` values.
-- The changed code used a distinctive helper name, so name-only fallback was still accurate.
-
-Remaining concern:
-
-- Java APIs with overloaded or common method names still need receiver/import/class context to be reliable at Netty/Spring scale.
-
-Detailed behavior:
-
-The bug:
-
-- `AbstractTrafficShapingHandler#calculateSize` supports `ByteBuf`, `ByteBufHolder`, and `FileRegion`.
-- Traffic-shaping handlers can queue delayed writes for `ByteBufHolder` messages such as HTTP content.
-- On close/handler removal, the handlers previously released only direct `ByteBuf` queued messages.
-- Queued `ByteBufHolder` or other `ReferenceCounted` messages could leak.
-- Their `ChannelPromise`s were also left incomplete even though the messages would never be written.
-
-The fix:
-
-- `AbstractTrafficShapingHandler` added:
-
-```java
-static void releaseAndFailQueuedWrite(Object msg, ChannelPromise promise, Throwable cause) {
-    ReferenceCountUtil.safeRelease(msg);
-    promise.tryFailure(cause);
-}
-```
-
-- `ChannelTrafficShapingHandler.handlerRemoved`;
-- `GlobalTrafficShapingHandler.handlerRemoved`;
-- `GlobalChannelTrafficShapingHandler.handlerRemoved`;
-
-all now:
-
-- create a `ClosedChannelException`;
-- call `releaseAndFailQueuedWrite(...)` for queued messages;
-- reset local/per-channel queue size after cleanup;
-- clear the queue.
-
-The regression test:
-
-- creates an `EmbeddedChannel` with each traffic-shaping handler variant;
-- writes a delayed `DefaultByteBufHolder`;
-- verifies the promise is not initially done and no outbound write is produced;
-- closes the channel;
-- verifies reference count drops to `0`;
-- verifies the promise fails with `ClosedChannelException`;
-- verifies there is no leftover outbound data.
-
-Ochna commands that gave high signal:
-
-```bash
-ochna node --file handler/src/main/java/io/netty/handler/traffic/AbstractTrafficShapingHandler.java --symbols-only --json
-ochna node --symbol releaseAndFailQueuedWrite --include-code --json
-ochna callers releaseAndFailQueuedWrite --json
-ochna node --symbol testQueuedWritesReleasedAndFailedOnClose --include-code --json
-```
-
-The `callers releaseAndFailQueuedWrite` result was exactly what we want from ochna:
-
-- `ChannelTrafficShapingHandler::handlerRemoved`;
-- `GlobalTrafficShapingHandler::handlerRemoved`;
-- `GlobalChannelTrafficShapingHandler::handlerRemoved`.
-
-That is the positive model for the redesign: when names are distinctive and ownership is clear, ochna already behaves like a strong structural graph. The redesign should make more common method calls behave like this case.
 
 ## Current Dataflow
 
@@ -396,29 +124,45 @@ Keep the existing fields for compatibility and indexing. New fields can be nulla
 
 ### Add Resolution Metadata
 
-Add metadata to edges, or add a side table keyed by edge:
+Carry one `resolution_kind` column directly on `edges`:
 
 ```text
 edges
   source_nid
   target_nid
   kind
-  resolution_kind TEXT       -- exact, receiver_type, package, same_file, namespace, name_only
-  confidence INTEGER         -- suggested 100, 90, 80, 60, 30
+  resolution_kind INTEGER NOT NULL DEFAULT 0   -- enum, see below
+  PRIMARY KEY (source_nid, target_nid, kind)   -- unchanged, WITHOUT ROWID
 ```
 
-If changing the `edges` primary key is too risky, use:
+`resolution_kind` is a small integer enum, not text, to stay consistent with the
+0.0.4 interning/size work (the alternative — a `TEXT` label repeated across
+~2.3M Linux edges — would undo it):
 
 ```text
-edge_metadata
-  source_nid
-  target_nid
-  kind
-  resolution_kind TEXT NOT NULL
-  confidence INTEGER NOT NULL
+0 name_only      30
+1 same_file       60
+2 namespace        80
+3 package           80
+4 receiver_type      90
+5 exact               100
 ```
 
-The side-table option is lower-risk for migration because query commands can join it only where needed.
+**Confidence is derived, not stored.** It is a pure function of
+`resolution_kind` (the mapping above), so storing it as a second column would
+duplicate data on every edge for no gain. Query code maps the enum to a
+confidence number on read.
+
+Why columns on `edges` rather than a side `edge_metadata` table:
+
+- `.ochna/ochna.db` is a derived cache, rebuilt on schema-version bump — there
+  is no precious DB to migrate, so the side-table "lower migration risk"
+  argument does not apply here.
+- *Every* edge carries a `resolution_kind`, so a side table saves no rows; it
+  only duplicates the `(source_nid, target_nid, kind)` key per row and adds a
+  join on the hot query path, fighting the recent size/latency work.
+- Keeping the PK at `(source_nid, target_nid, kind)` is intentional: one edge
+  per relation, holding its best `resolution_kind` — not multiple evidence rows.
 
 ### Add Symbol Ownership Indexes
 
@@ -530,7 +274,7 @@ for each raw_call:
 Each successful stage emits:
 
 ```text
-edge(source, target, "calls", resolution_kind, confidence)
+edge(source, target, "calls", resolution_kind)   -- confidence derived on read
 ```
 
 For stage 7, there are two policy options:
@@ -545,13 +289,17 @@ Recommendation: emit an `ambiguous_refs` record for multi-candidate name-only ca
 Add filters without breaking existing commands:
 
 ```bash
-ochna callers GetList --min-confidence 80
-ochna callers GetList --include-low-confidence
+ochna callers GetList --min-confidence 80   # opt-in filter
 ochna node --symbol Foo --include-code --show-resolution
 ochna explore watchCache --show-resolution
 ```
 
-Default behavior should hide or visually down-rank low-confidence edges. JSON output should include:
+**Default behavior must not silently hide edges.** That would contradict the
+"preserve, don't silently drop" contract above and regress existing `callers`
+workflows that rely on broad results. Instead, the default **rank** edges
+high-confidence-first and annotate each with its kind; `--min-confidence` is the
+explicit opt-in for filtering. JSON output always includes the resolution kind
+and its derived confidence:
 
 ```json
 {
@@ -560,7 +308,7 @@ Default behavior should hide or visually down-rank low-confidence edges. JSON ou
 }
 ```
 
-This is important for agents. They can decide when to trust an edge and when to inspect source directly.
+This is important for agents. They can decide when to trust an edge and when to inspect source directly — but nothing is hidden from them without asking.
 
 ## Migration Plan
 
@@ -622,12 +370,10 @@ Extend `SymbolIndex`:
 
 Implement staged resolution.
 
-Add `edge_metadata` or edge columns for:
-
-- `resolution_kind`;
-- `confidence`.
-
-Recommendation: use `edge_metadata` first if schema churn risk is high.
+Add the `resolution_kind` column to `edges` and bump `SCHEMA_VERSION`. Because
+the DB is a derived cache that rebuilds on a version bump, this needs no data
+migration — old DBs are dropped and re-indexed from source. Confidence is
+derived from `resolution_kind` on read, not stored.
 
 Success criteria:
 
@@ -642,15 +388,14 @@ Goal: make improved data useful to humans and agents.
 
 Add:
 
-- `--min-confidence`;
-- `--include-low-confidence`;
+- `--min-confidence` (opt-in filter);
 - `--show-resolution`.
 
 Default command behavior:
 
-- text output shows high-confidence edges first;
-- JSON includes confidence fields;
-- name-only ambiguous matches are not silently mixed with exact edges.
+- text output ranks high-confidence edges first and annotates each with its kind;
+- JSON includes `resolution_kind` + derived `confidence`;
+- no edges are hidden by default — name-only matches are ranked last, not dropped.
 
 Success criteria:
 
@@ -725,7 +470,8 @@ Add indexes only after measuring. `receiver_expr` may not need an index if it is
 
 | Risk | Mitigation |
 | --- | --- |
-| Schema churn breaks existing DBs | Add migration tests and keep nullable fields first |
+| Schema change to `edges`/`raw_calls` | DB is a derived cache: bump `SCHEMA_VERSION`, drop + re-index from source — no in-place migration needed |
+| `resolution_kind` bloats edge rows | Store as a small INTEGER enum, derive confidence on read — no second column |
 | Resolver gets too clever and slow | Stage maps in memory; no per-call SQL |
 | False confidence is worse than noisy edges | Prefer unresolved/ambiguous over low-confidence guessed edges |
 | Java local type inference becomes a rabbit hole | Start with parameters, fields, explicit locals, constructor assignments |
@@ -759,23 +505,26 @@ Second slice: Go selector receiver expression and package alias resolution.
 
 Third slice: C/C++ confidence classification and deletion-aware workflow.
 
-## Decision To Make Before Implementation
+## Edge-Storage Decision
 
-The main design decision is edge storage:
+The candidate designs for where resolution metadata lives:
 
-Option A: add `resolution_kind` and `confidence` directly to `edges`.
+Option A (chosen): add a `resolution_kind` INTEGER enum directly on `edges`.
 
-- simpler query joins;
-- bigger schema change;
-- primary key remains source/target/kind, so multiple evidence paths collapse.
+- no join on the hot query path;
+- PK stays `(source_nid, target_nid, kind)` — one edge per relation, holding its
+  best resolution kind;
+- schema change is cheap because the DB rebuilds on a version bump.
 
-Option B: add `edge_metadata`.
+Option B (rejected): a side `edge_metadata` table.
 
-- lower-risk migration;
-- can store extra fields later;
-- requires joins in query code.
+- its only real advantage — "lower migration risk" — does not apply: the DB is a
+  derived cache with no data to migrate;
+- every edge needs a `resolution_kind`, so it saves no rows; it duplicates the
+  3-column key per row and adds a join, fighting the 0.0.4 size/latency work.
 
-Recommendation: Option B for the first implementation. Once stable, fold into `edges` only if query performance or simplicity demands it.
+Decision: **Option A**, with `resolution_kind` as a small INTEGER enum and
+confidence derived from it on read (never stored).
 
 ## Final Argument
 

@@ -137,8 +137,8 @@ mod tests {
         // Verify new query commands query the SQLite database successfully and print expected output formats
         run_search(&temp_workspace, "helper", false, false).unwrap();
         run_search(&temp_workspace, "helper", true, false).unwrap();
-        run_callers(&temp_workspace, "helper", false, false).unwrap();
-        run_callers(&temp_workspace, "helper", true, false).unwrap();
+        run_callers(&temp_workspace, "helper", false, false, None, false).unwrap();
+        run_callers(&temp_workspace, "helper", true, false, None, false).unwrap();
 
         // Test run_node with file (symbols_only = false)
         run_node(
@@ -150,6 +150,7 @@ mod tests {
             None,
             false,
             None,
+            false,
             false,
             false,
         )
@@ -166,6 +167,7 @@ mod tests {
             None,
             false,
             false,
+            false,
         )
         .unwrap();
         // Test run_node with symbol (include_code = true)
@@ -178,6 +180,7 @@ mod tests {
             Some("helper".to_string()),
             true,
             None,
+            false,
             false,
             false,
         )
@@ -194,6 +197,7 @@ mod tests {
             None,
             true,
             false,
+            false,
         )
         .unwrap();
         // Test run_node with symbol (include_code = true and line filtering)
@@ -208,12 +212,13 @@ mod tests {
             Some(6),
             false,
             false,
+            false,
         )
         .unwrap();
 
         // Test run_explore (text + json)
-        run_explore(&temp_workspace, "helper", false, false).unwrap();
-        run_explore(&temp_workspace, "helper", true, false).unwrap();
+        run_explore(&temp_workspace, "helper", false, false, false).unwrap();
+        run_explore(&temp_workspace, "helper", true, false, false).unwrap();
 
         // 3. Modify a file and check that re-indexing works
         let rust_code_modified = r#"
@@ -652,8 +657,6 @@ mod tests {
             edges_resolved.push(format!("{} -> {}", src, tgt));
         }
 
-        println!("Resolved edges:\n{}", edges_resolved.join("\n"));
-
         // Let's also check unresolved refs to see how macro and indirect pointer calls are handled
         let mut stmt = conn
             .prepare("SELECT (SELECT id FROM nodes WHERE nid = source_nid), specifier FROM unresolved_refs ORDER BY specifier")
@@ -671,31 +674,66 @@ mod tests {
             let (src, specifier) = r.unwrap();
             unresolved.push(format!("{} -> (unresolved) {}", src, specifier));
         }
-        println!("Unresolved refs:\n{}", unresolved.join("\n"));
 
-        // Noise assertions:
-        // Go: Both calls to GetList, Add, Run in work() resolve to Cacher instead of their respective types or global.
-        assert!(edges_resolved
-            .contains(&"src/main.go::work -> src/main.go::Cacher::GetList".to_string()));
-        assert!(
-            edges_resolved.contains(&"src/main.go::work -> src/main.go::Cacher::Add".to_string())
-        );
-        assert!(
-            edges_resolved.contains(&"src/main.go::work -> src/main.go::Cacher::Run".to_string())
-        );
-        // Note: Queue's methods are not in target_id because the resolver picked Cacher's methods for both.
-        assert!(!edges_resolved.iter().any(|e| e.contains("Queue")));
+        let mut stmt_kinds = conn
+            .prepare(
+                "SELECT (SELECT id FROM nodes WHERE nid = source_nid) as src, \
+                        (SELECT id FROM nodes WHERE nid = target_nid) as tgt, \
+                        resolution_kind \
+                 FROM edges ORDER BY src, tgt",
+            )
+            .unwrap();
+        let rows_kinds = stmt_kinds
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, Option<String>>(0)?.unwrap_or_default(),
+                    row.get::<_, Option<String>>(1)?.unwrap_or_default(),
+                    row.get::<_, i64>(2)?,
+                ))
+            })
+            .unwrap();
+        let mut edges_kinds_resolved = Vec::new();
+        for r in rows_kinds {
+            let (src, tgt, kind) = r.unwrap();
+            edges_kinds_resolved.push(format!("{} -> {} (kind={})", src, tgt, kind));
+        }
 
-        // Java: Both promise.release() and handler.release() resolve to Promise::release
-        assert!(edges_resolved
-            .contains(&"src/App.java::App::main -> src/App.java::Promise::release".to_string()));
-        assert!(edges_resolved
-            .contains(&"src/App.java::App::main -> src/App.java::Promise::tryFailure".to_string()));
-        assert!(edges_resolved
-            .contains(&"src/App.java::App::main -> src/App.java::Promise::run".to_string()));
-        assert!(!edges_resolved
-            .iter()
-            .any(|e| e.contains("TrafficHandler::")));
+        // Go assertions
+        assert!(edges_kinds_resolved
+            .contains(&"src/main.go::work -> src/main.go::Cacher::GetList (kind=1)".to_string()));
+        assert!(edges_kinds_resolved
+            .contains(&"src/main.go::work -> src/main.go::Cacher::Add (kind=1)".to_string()));
+        assert!(edges_kinds_resolved
+            .contains(&"src/main.go::work -> src/main.go::Cacher::Run (kind=1)".to_string()));
+        assert!(edges_kinds_resolved
+            .contains(&"src/main.go::work -> src/main.go::Queue::GetList (kind=1)".to_string()));
+        assert!(edges_kinds_resolved
+            .contains(&"src/main.go::work -> src/main.go::Queue::Add (kind=1)".to_string()));
+        assert!(edges_kinds_resolved
+            .contains(&"src/main.go::work -> src/main.go::Queue::Run (kind=1)".to_string()));
+        assert!(edges_kinds_resolved
+            .contains(&"src/main.go::work -> src/main.go::Run (kind=1)".to_string()));
+
+        // Java assertions
+        assert!(edges_kinds_resolved.contains(
+            &"src/App.java::demo::App::main -> src/App.java::demo::Promise::release (kind=4)"
+                .to_string()
+        ));
+        assert!(edges_kinds_resolved.contains(
+            &"src/App.java::demo::App::main -> src/App.java::demo::Promise::tryFailure (kind=4)"
+                .to_string()
+        ));
+        assert!(edges_kinds_resolved.contains(
+            &"src/App.java::demo::App::main -> src/App.java::demo::Promise::run (kind=4)"
+                .to_string()
+        ));
+        assert!(edges_kinds_resolved.contains(&"src/App.java::demo::App::main -> src/App.java::demo::TrafficHandler::release (kind=4)".to_string()));
+        assert!(edges_kinds_resolved.contains(&"src/App.java::demo::App::main -> src/App.java::demo::TrafficHandler::tryFailure (kind=4)".to_string()));
+        assert!(edges_kinds_resolved.contains(
+            &"src/App.java::demo::App::main -> src/App.java::demo::TrafficHandler::run (kind=4)"
+                .to_string()
+        ));
+        assert!(edges_kinds_resolved.contains(&"src/App.java::demo::App::main -> src/StaticHelper.java::demo::StaticHelper::run (kind=5)".to_string()));
 
         // C: MY_MACRO and ptr should be unresolved
         assert!(unresolved.contains(&"src/main.c::main -> (unresolved) MY_MACRO".to_string()));

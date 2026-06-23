@@ -42,6 +42,10 @@ pub struct Node {
     /// time). Defaults false; populated by `map_row_to_node` from the column.
     #[serde(default)]
     pub is_test: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resolution_kind: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub confidence: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -49,6 +53,8 @@ pub struct Edge {
     pub source_id: String,
     pub target_id: String,
     pub kind: String,
+    #[serde(default)]
+    pub resolution_kind: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -119,6 +125,30 @@ pub(crate) fn split_callee_name(callee_name: &str) -> (Option<String>, String) {
     }
 }
 
+pub fn confidence_for_kind(resolution_kind: i64) -> i64 {
+    match resolution_kind {
+        0 => 30,  // name_only
+        1 => 60,  // same_file
+        2 => 80,  // namespace
+        3 => 80,  // package
+        4 => 90,  // receiver_type
+        5 => 100, // exact
+        _ => 30,
+    }
+}
+
+pub fn label_for_kind(resolution_kind: i64) -> &'static str {
+    match resolution_kind {
+        0 => "name_only",
+        1 => "same_file",
+        2 => "namespace",
+        3 => "package",
+        4 => "receiver_type",
+        5 => "exact",
+        _ => "unknown",
+    }
+}
+
 /// Helper mapping database Row back to a Node structure
 pub(crate) fn map_row_to_node(row: &rusqlite::Row) -> rusqlite::Result<Node> {
     Ok(Node {
@@ -134,6 +164,8 @@ pub(crate) fn map_row_to_node(row: &rusqlite::Row) -> rusqlite::Result<Node> {
         signature: row.get(9)?,
         doc_comment: row.get(10)?,
         is_test: row.get(11)?,
+        resolution_kind: None,
+        confidence: None,
     })
 }
 
@@ -194,6 +226,8 @@ mod tests {
             signature: Some("fn main()".to_string()),
             doc_comment: Some("Main entrypoint".to_string()),
             is_test: false,
+            resolution_kind: None,
+            confidence: None,
         };
 
         let node_helper = Node {
@@ -209,6 +243,8 @@ mod tests {
             signature: Some("fn helper()".to_string()),
             doc_comment: Some("Helper function that does magic".to_string()),
             is_test: false,
+            resolution_kind: None,
+            confidence: None,
         };
 
         upsert_node(&conn, &node_main).unwrap();
@@ -227,6 +263,7 @@ mod tests {
             source_id: "src/main.rs::main".to_string(),
             target_id: "src/main.rs::helper".to_string(),
             kind: "calls".to_string(),
+            resolution_kind: 5,
         };
         upsert_edge(&conn, &edge_call).unwrap();
 
