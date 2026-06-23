@@ -51,6 +51,8 @@ pub(super) fn traverse_rust<'a>(
                     signature: Some(sig),
                     doc_comment: doc,
                     is_test: false,
+                    resolution_kind: None,
+                    confidence: None,
                 });
             }
         }
@@ -81,6 +83,8 @@ pub(super) fn traverse_rust<'a>(
                     signature: Some(sig),
                     doc_comment: doc,
                     is_test: false,
+                    resolution_kind: None,
+                    confidence: None,
                 });
             }
         }
@@ -111,6 +115,8 @@ pub(super) fn traverse_rust<'a>(
                     signature: Some(sig),
                     doc_comment: doc,
                     is_test: false,
+                    resolution_kind: None,
+                    confidence: None,
                 });
             }
         }
@@ -168,6 +174,8 @@ pub(super) fn traverse_rust<'a>(
                     signature: Some(sig),
                     doc_comment: doc,
                     is_test: false,
+                    resolution_kind: None,
+                    confidence: None,
                 });
 
                 id_holder = id;

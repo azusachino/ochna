@@ -16,6 +16,7 @@ pub struct SymbolCandidate {
     pub id: InternedString,
     pub file_path: InternedString,
     pub namespace: Option<InternedString>,
+    pub qualified_name: InternedString,
 }
 
 #[derive(Debug, Default)]
@@ -24,6 +25,8 @@ pub struct SymbolIndex {
     pub strings: Vec<String>,
     pub by_name: FxHashMap<String, CandidateList>,
     pub by_name_file: FxHashMap<String, CandidateByFile>,
+    pub by_qualified_name: FxHashMap<String, CandidateList>,
+    pub by_owner_and_name: FxHashMap<(String, String), CandidateList>,
     pub by_id: FxHashMap<String, SymbolIx>,
 }
 
@@ -32,6 +35,8 @@ pub struct SymbolIndexBuilder {
     symbols: Vec<SymbolCandidate>,
     by_name: FxHashMap<String, CandidateList>,
     by_name_file: FxHashMap<String, CandidateByFile>,
+    by_qualified_name: FxHashMap<String, CandidateList>,
+    by_owner_and_name: FxHashMap<(String, String), CandidateList>,
     by_id: FxHashMap<String, SymbolIx>,
     interner: StringInterner,
 }
@@ -51,8 +56,24 @@ impl SymbolIndexBuilder {
             .and_then(parent_namespace)
             .map(|namespace| self.interner.intern(namespace));
 
-        self.symbols
-            .push(SymbolCandidate::new(id_ix, file_path_ix, namespace_ix));
+        let qname = if let Some(q) = qualified_name {
+            q
+        } else {
+            let prefix = format!("{}::", file_path);
+            if let Some(stripped) = id.strip_prefix(&prefix) {
+                stripped
+            } else {
+                id
+            }
+        };
+        let qualified_name_ix = self.interner.intern(qname);
+
+        self.symbols.push(SymbolCandidate::new(
+            id_ix,
+            file_path_ix,
+            namespace_ix,
+            qualified_name_ix,
+        ));
         self.by_name.entry(name.to_string()).or_default().push(ix);
         self.by_name_file
             .entry(name.to_string())
@@ -60,6 +81,18 @@ impl SymbolIndexBuilder {
             .entry(file_path_ix)
             .or_default()
             .push(ix);
+        if let Some(qname) = qualified_name {
+            self.by_qualified_name
+                .entry(qname.to_string())
+                .or_default()
+                .push(ix);
+            if let Some((owner, _)) = qname.rsplit_once("::") {
+                self.by_owner_and_name
+                    .entry((owner.to_string(), name.to_string()))
+                    .or_default()
+                    .push(ix);
+            }
+        }
         self.by_id.insert(id.to_string(), ix);
         ix
     }
@@ -70,6 +103,8 @@ impl SymbolIndexBuilder {
             strings: self.interner.into_strings(),
             by_name: self.by_name,
             by_name_file: self.by_name_file,
+            by_qualified_name: self.by_qualified_name,
+            by_owner_and_name: self.by_owner_and_name,
             by_id: self.by_id,
         }
     }
@@ -123,11 +158,13 @@ impl SymbolCandidate {
         id: InternedString,
         file_path: InternedString,
         namespace: Option<InternedString>,
+        qualified_name: InternedString,
     ) -> Self {
         Self {
             id,
             file_path,
             namespace,
+            qualified_name,
         }
     }
 }

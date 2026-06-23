@@ -137,8 +137,8 @@ mod tests {
         // Verify new query commands query the SQLite database successfully and print expected output formats
         run_search(&temp_workspace, "helper", false, false).unwrap();
         run_search(&temp_workspace, "helper", true, false).unwrap();
-        run_callers(&temp_workspace, "helper", false, false).unwrap();
-        run_callers(&temp_workspace, "helper", true, false).unwrap();
+        run_callers(&temp_workspace, "helper", false, false, None, false).unwrap();
+        run_callers(&temp_workspace, "helper", true, false, None, false).unwrap();
 
         // Test run_node with file (symbols_only = false)
         run_node(
@@ -150,6 +150,7 @@ mod tests {
             None,
             false,
             None,
+            false,
             false,
             false,
         )
@@ -166,6 +167,7 @@ mod tests {
             None,
             false,
             false,
+            false,
         )
         .unwrap();
         // Test run_node with symbol (include_code = true)
@@ -178,6 +180,7 @@ mod tests {
             Some("helper".to_string()),
             true,
             None,
+            false,
             false,
             false,
         )
@@ -194,6 +197,7 @@ mod tests {
             None,
             true,
             false,
+            false,
         )
         .unwrap();
         // Test run_node with symbol (include_code = true and line filtering)
@@ -208,12 +212,13 @@ mod tests {
             Some(6),
             false,
             false,
+            false,
         )
         .unwrap();
 
         // Test run_explore (text + json)
-        run_explore(&temp_workspace, "helper", false, false).unwrap();
-        run_explore(&temp_workspace, "helper", true, false).unwrap();
+        run_explore(&temp_workspace, "helper", false, false, false).unwrap();
+        run_explore(&temp_workspace, "helper", true, false, false).unwrap();
 
         // 3. Modify a file and check that re-indexing works
         let rust_code_modified = r#"
@@ -525,6 +530,305 @@ mod tests {
             )
             .unwrap();
         assert_eq!(unresolved_after, 0);
+
+        fs::remove_dir_all(&temp_workspace).unwrap();
+    }
+
+    #[test]
+    fn test_call_resolution_baseline_fixtures() {
+        let temp_workspace = create_temp_dir();
+        let src_dir = temp_workspace.join("src");
+        fs::create_dir_all(&src_dir).unwrap();
+
+        // 1. Go Fixtures
+        let go_code = r#"
+            package main
+            
+            type Cacher struct {}
+            func (c *Cacher) GetList() {}
+            func (c *Cacher) Add() {}
+            func (c *Cacher) Run() {}
+            
+            type Queue struct {}
+            func (q *Queue) GetList() {}
+            func (q *Queue) Add() {}
+            func (q *Queue) Run() {}
+            
+            func Run() {}
+            
+            func work() {
+                c := &Cacher{}
+                c.GetList()
+                c.Add()
+                c.Run()
+                
+                q := &Queue{}
+                q.GetList()
+                q.Add()
+                q.Run()
+                
+                Run()
+            }
+        "#;
+        fs::write(src_dir.join("main.go"), go_code).unwrap();
+
+        // 2. Java Fixtures
+        let java_code_app = r#"
+            package demo;
+            import demo.StaticHelper;
+            
+            class Promise {
+                public void release() {}
+                public void tryFailure() {}
+                public void run() {}
+            }
+            
+            class TrafficHandler {
+                public void release() {}
+                public void tryFailure() {}
+                public void run() {}
+            }
+            
+            public class App {
+                public static void main(String[] args) {
+                    Promise promise = new Promise();
+                    promise.release();
+                    promise.tryFailure();
+                    promise.run();
+                    
+                    TrafficHandler handler = new TrafficHandler();
+                    handler.release();
+                    handler.tryFailure();
+                    handler.run();
+                    
+                    StaticHelper.run();
+                }
+            }
+        "#;
+        fs::write(src_dir.join("App.java"), java_code_app).unwrap();
+
+        let java_code_helper = r#"
+            package demo;
+            public class StaticHelper {
+                public static void run() {}
+            }
+        "#;
+        fs::write(src_dir.join("StaticHelper.java"), java_code_helper).unwrap();
+
+        // 3. C Fixtures
+        let c_code = r#"
+            void helper(void) {}
+            #define MY_MACRO(x) x
+            
+            int main(void) {
+                helper();
+                MY_MACRO(1);
+                void (*ptr)(void) = helper;
+                ptr();
+                return 0;
+            }
+        "#;
+        fs::write(src_dir.join("main.c"), c_code).unwrap();
+
+        run_init(&temp_workspace, false).unwrap();
+
+        let db_path = temp_workspace.join(".ochna").join("ochna.db");
+        let conn = Connection::open(&db_path).unwrap();
+
+        let mut stmt = conn
+            .prepare(
+                "SELECT (SELECT id FROM nodes WHERE nid = source_nid) as src, \
+                        (SELECT id FROM nodes WHERE nid = target_nid) as tgt \
+                 FROM edges ORDER BY src, tgt",
+            )
+            .unwrap();
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, Option<String>>(0)?.unwrap_or_default(),
+                    row.get::<_, Option<String>>(1)?.unwrap_or_default(),
+                ))
+            })
+            .unwrap();
+
+        let mut edges_resolved = Vec::new();
+        for r in rows {
+            let (src, tgt) = r.unwrap();
+            edges_resolved.push(format!("{} -> {}", src, tgt));
+        }
+
+        // Let's also check unresolved refs to see how macro and indirect pointer calls are handled
+        let mut stmt = conn
+            .prepare("SELECT (SELECT id FROM nodes WHERE nid = source_nid), specifier FROM unresolved_refs ORDER BY specifier")
+            .unwrap();
+        let unresolved_rows = stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, Option<String>>(0)?.unwrap_or_default(),
+                    row.get::<_, String>(1)?,
+                ))
+            })
+            .unwrap();
+        let mut unresolved = Vec::new();
+        for r in unresolved_rows {
+            let (src, specifier) = r.unwrap();
+            unresolved.push(format!("{} -> (unresolved) {}", src, specifier));
+        }
+
+        let mut stmt_kinds = conn
+            .prepare(
+                "SELECT (SELECT id FROM nodes WHERE nid = source_nid) as src, \
+                        (SELECT id FROM nodes WHERE nid = target_nid) as tgt, \
+                        resolution_kind \
+                 FROM edges ORDER BY src, tgt",
+            )
+            .unwrap();
+        let rows_kinds = stmt_kinds
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, Option<String>>(0)?.unwrap_or_default(),
+                    row.get::<_, Option<String>>(1)?.unwrap_or_default(),
+                    row.get::<_, i64>(2)?,
+                ))
+            })
+            .unwrap();
+        let mut edges_kinds_resolved = Vec::new();
+        for r in rows_kinds {
+            let (src, tgt, kind) = r.unwrap();
+            edges_kinds_resolved.push(format!("{} -> {} (kind={})", src, tgt, kind));
+        }
+
+        // Go assertions
+        assert!(edges_kinds_resolved
+            .contains(&"src/main.go::work -> src/main.go::Cacher::GetList (kind=1)".to_string()));
+        assert!(edges_kinds_resolved
+            .contains(&"src/main.go::work -> src/main.go::Cacher::Add (kind=1)".to_string()));
+        assert!(edges_kinds_resolved
+            .contains(&"src/main.go::work -> src/main.go::Cacher::Run (kind=1)".to_string()));
+        assert!(edges_kinds_resolved
+            .contains(&"src/main.go::work -> src/main.go::Queue::GetList (kind=1)".to_string()));
+        assert!(edges_kinds_resolved
+            .contains(&"src/main.go::work -> src/main.go::Queue::Add (kind=1)".to_string()));
+        assert!(edges_kinds_resolved
+            .contains(&"src/main.go::work -> src/main.go::Queue::Run (kind=1)".to_string()));
+        assert!(edges_kinds_resolved
+            .contains(&"src/main.go::work -> src/main.go::Run (kind=1)".to_string()));
+
+        // Java assertions
+        assert!(edges_kinds_resolved.contains(
+            &"src/App.java::demo::App::main -> src/App.java::demo::Promise::release (kind=4)"
+                .to_string()
+        ));
+        assert!(edges_kinds_resolved.contains(
+            &"src/App.java::demo::App::main -> src/App.java::demo::Promise::tryFailure (kind=4)"
+                .to_string()
+        ));
+        assert!(edges_kinds_resolved.contains(
+            &"src/App.java::demo::App::main -> src/App.java::demo::Promise::run (kind=4)"
+                .to_string()
+        ));
+        assert!(edges_kinds_resolved.contains(&"src/App.java::demo::App::main -> src/App.java::demo::TrafficHandler::release (kind=4)".to_string()));
+        assert!(edges_kinds_resolved.contains(&"src/App.java::demo::App::main -> src/App.java::demo::TrafficHandler::tryFailure (kind=4)".to_string()));
+        assert!(edges_kinds_resolved.contains(
+            &"src/App.java::demo::App::main -> src/App.java::demo::TrafficHandler::run (kind=4)"
+                .to_string()
+        ));
+        assert!(edges_kinds_resolved.contains(&"src/App.java::demo::App::main -> src/StaticHelper.java::demo::StaticHelper::run (kind=5)".to_string()));
+
+        // C: MY_MACRO and ptr should be unresolved
+        assert!(unresolved.contains(&"src/main.c::main -> (unresolved) MY_MACRO".to_string()));
+        assert!(unresolved.contains(&"src/main.c::main -> (unresolved) ptr".to_string()));
+
+        // Clean up
+        fs::remove_dir_all(&temp_workspace).unwrap();
+    }
+
+    #[test]
+    fn test_raw_call_metadata_capture() {
+        let temp_workspace = create_temp_dir();
+        let src_dir = temp_workspace.join("src");
+        fs::create_dir_all(&src_dir).unwrap();
+
+        // 1. Go code with imports and selectors
+        let go_code = r#"
+            package main
+            import (
+                "fmt"
+                storage "k8s.io/apiserver/pkg/storage"
+            )
+            func work() {
+                storage.ValidateListOptions()
+            }
+        "#;
+        fs::write(src_dir.join("main.go"), go_code).unwrap();
+
+        // 2. Java code with variable types
+        let java_code = r#"
+            package demo;
+            import io.netty.channel.ChannelPromise;
+            public class App {
+                public void method(ChannelPromise promise) {
+                    promise.tryFailure();
+                }
+            }
+        "#;
+        fs::write(src_dir.join("App.java"), java_code).unwrap();
+
+        run_init(&temp_workspace, false).unwrap();
+
+        let db_path = temp_workspace.join(".ochna").join("ochna.db");
+        let conn = Connection::open(&db_path).unwrap();
+
+        let mut stmt = conn
+            .prepare(
+                "SELECT callee_name, call_kind, receiver_expr, receiver_type, package_or_namespace, import_hint \
+                 FROM raw_calls ORDER BY callee_name",
+            )
+            .unwrap();
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                    row.get::<_, Option<String>>(4)?,
+                    row.get::<_, Option<String>>(5)?,
+                ))
+            })
+            .unwrap();
+
+        let mut raw_calls_verified = Vec::new();
+        for r in rows {
+            let (name, kind, rx, rx_t, ns, imp) = r.unwrap();
+            raw_calls_verified.push(format!(
+                "{} | {:?} | {:?} | {:?} | {:?} | {:?}",
+                name, kind, rx, rx_t, ns, imp
+            ));
+        }
+
+        println!("Raw calls metadata:\n{}", raw_calls_verified.join("\n"));
+
+        // Go assertions
+        let go_call = raw_calls_verified
+            .iter()
+            .find(|c| c.contains("ValidateListOptions"))
+            .unwrap();
+        assert!(go_call.contains(&r#"Some("method")"#.to_string()));
+        assert!(go_call.contains(&r#"Some("storage")"#.to_string()));
+        assert!(go_call.contains(&r#"Some("main")"#.to_string()));
+        assert!(go_call.contains(&r#"Some("k8s.io/apiserver/pkg/storage")"#.to_string()));
+
+        // Java assertions
+        let java_call = raw_calls_verified
+            .iter()
+            .find(|c| c.contains("tryFailure"))
+            .unwrap();
+        assert!(java_call.contains(&r#"Some("method")"#.to_string()));
+        assert!(java_call.contains(&r#"Some("promise")"#.to_string()));
+        assert!(java_call.contains(&r#"Some("ChannelPromise")"#.to_string()));
+        assert!(java_call.contains(&r#"Some("demo")"#.to_string()));
+        assert!(java_call.contains(&r#"Some("io.netty.channel.ChannelPromise")"#.to_string()));
 
         fs::remove_dir_all(&temp_workspace).unwrap();
     }

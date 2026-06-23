@@ -68,6 +68,19 @@ pub fn parse_code(
             None,
         );
     } else if lang == "go" {
+        let package_node = common::find_child_by_kind(tree.root_node(), "package_clause");
+        let package_name = package_node.and_then(|n| {
+            common::find_child_by_kind(n, "package_identifier")
+                .or_else(|| common::find_child_by_kind(n, "identifier"))
+                .map(|name_node| {
+                    name_node
+                        .utf8_text(content.as_bytes())
+                        .unwrap_or("")
+                        .trim()
+                        .to_string()
+                })
+        });
+        let imports = go::collect_go_imports(tree.root_node(), content);
         go::traverse_go(
             tree.root_node(),
             content,
@@ -75,8 +88,44 @@ pub fn parse_code(
             &mut nodes,
             &mut raw_calls,
             None,
+            package_name.as_deref(),
+            &imports,
         );
     } else if lang == "java" {
+        let package_node = common::find_child_by_kind(tree.root_node(), "package_declaration");
+        let package_name = package_node.and_then(|n| {
+            common::find_child_by_kind(n, "scoped_identifier")
+                .or_else(|| common::find_child_by_kind(n, "identifier"))
+                .map(|name_node| {
+                    name_node
+                        .utf8_text(content.as_bytes())
+                        .unwrap_or("")
+                        .trim()
+                        .to_string()
+                })
+        });
+
+        let mut imports = Vec::new();
+        let mut cursor = tree.root_node().walk();
+        for child in tree.root_node().children(&mut cursor) {
+            if child.kind() == "import_declaration" {
+                if let Some(imported_node) = child
+                    .child_by_field_name("name")
+                    .or_else(|| common::find_child_by_kind(child, "scoped_identifier"))
+                    .or_else(|| common::find_child_by_kind(child, "identifier"))
+                {
+                    let imported_str = imported_node
+                        .utf8_text(content.as_bytes())
+                        .unwrap_or("")
+                        .trim()
+                        .to_string();
+                    if !imported_str.is_empty() {
+                        imports.push(imported_str);
+                    }
+                }
+            }
+        }
+
         java::traverse_java(
             tree.root_node(),
             content,
@@ -85,6 +134,9 @@ pub fn parse_code(
             &mut raw_calls,
             None,
             None,
+            None,
+            package_name.as_deref(),
+            &imports,
             None,
         );
     } else if lang == "c" || lang == "cpp" || lang == "c++" || lang == "cc" || lang == "cxx" {
@@ -98,6 +150,7 @@ pub fn parse_code(
                 parent_qualified_name: None,
                 parent_is_type: false,
             },
+            None,
             None,
         );
     } else if lang == "zig" {
@@ -271,6 +324,8 @@ fn test_free_fn() {
                 signature: None,
                 doc_comment: None,
                 is_test: false,
+                resolution_kind: None,
+                confidence: None,
             },
             Node {
                 id: "src/shapes.rs::Line::new".to_string(),
@@ -285,6 +340,8 @@ fn test_free_fn() {
                 signature: None,
                 doc_comment: None,
                 is_test: false,
+                resolution_kind: None,
+                confidence: None,
             },
             Node {
                 id: "src/shapes.rs::build".to_string(),
@@ -299,6 +356,8 @@ fn test_free_fn() {
                 signature: None,
                 doc_comment: None,
                 is_test: false,
+                resolution_kind: None,
+                confidence: None,
             },
         ];
         let calls = vec![RawCall::new(
@@ -331,6 +390,8 @@ fn test_free_fn() {
                 signature: None,
                 doc_comment: None,
                 is_test: false,
+                resolution_kind: None,
+                confidence: None,
             },
             Node {
                 id: "src/shapes.rs::Point::sum".to_string(),
@@ -345,6 +406,8 @@ fn test_free_fn() {
                 signature: None,
                 doc_comment: None,
                 is_test: false,
+                resolution_kind: None,
+                confidence: None,
             },
         ];
 

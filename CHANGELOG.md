@@ -9,7 +9,41 @@ Each release carries a **Performance** note for indexing-pipeline changes.
 test giants (`make report`); the numbers quoted here are directional and
 machine-dependent.
 
-## [Unreleased] — 0.0.4
+## [0.0.5] — 2026-06-23
+
+### Added
+
+- Confidence-aware staged call resolution. Each call site is resolved through a
+  cascade of increasingly specific stages and tagged with a `resolution_kind`
+  (stored as an integer enum on the `edges` table; confidence is derived on
+  read): `exact` (100) → `receiver_type` (90) → `package` / `namespace` (80) →
+  `same_file` (60) → `name_only` (30). Name-only matches with multiple equally
+  plausible targets are recorded as ambiguous/unresolved references instead of
+  emitting a low-confidence edge to every candidate.
+- Query flags `--min-confidence <N>` (filter `callers` results below a
+  confidence threshold) and `--show-resolution` (append
+  `[resolution: <kind>, confidence: <N>]` to query output). Results rank and
+  dedup by confidence so the strongest match surfaces first.
+- `raw_calls` now persists cheap AST context captured at parse time
+  (`call_kind`, `receiver`, `type`, `package`, `import_hint`), feeding the
+  resolution cascade without re-parsing.
+- `pyscripts/pr_feature_report.py` and `pyscripts/corpus_probes.py`, plus a
+  documented large-corpus PR archaeology workflow (`gh api` for PR
+  metadata/files + the local index for changed-file symbols); see
+  `docs/experiments/kubernetes-pr-139848.md`.
+
+### Changed
+
+- Query output for `callers` / `explore` / `node` now respects resolution
+  confidence by default (no edges are hidden unless `--min-confidence` is set).
+- Bumped crate version to `0.0.5`.
+
+### Performance
+
+- Resolution hot loop no longer allocates per call site; edge-set parity
+  (selective sync == full rebuild) re-verified after the resolution changes.
+
+## [0.0.4] — 2026-06-22
 
 ### Added
 
@@ -95,7 +129,8 @@ no-op re-sync **~3s**. See `BENCHMARK.md` for the full table.
 - Cross-file call-edge resolution with `unresolved_refs`; `--json` output and
   tracing diagnostics to stderr.
 
-[Unreleased]: https://github.com/azusachino/ochna/compare/v0.0.3...HEAD
+[0.0.5]: https://github.com/azusachino/ochna/compare/v0.0.4...v0.0.5
+[0.0.4]: https://github.com/azusachino/ochna/compare/v0.0.3...v0.0.4
 [0.0.3]: https://github.com/azusachino/ochna/compare/v0.0.2...v0.0.3
 [0.0.2]: https://github.com/azusachino/ochna/compare/v0.0.1...v0.0.2
 [0.0.1]: https://github.com/azusachino/ochna/releases/tag/v0.0.1

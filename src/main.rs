@@ -46,6 +46,12 @@ enum Commands {
     Callers {
         /// The name or ID of the symbol to query
         symbol: String,
+        /// Minimum confidence level to include in callers results (e.g. 80)
+        #[arg(long = "min-confidence")]
+        min_confidence: Option<i64>,
+        /// Display resolution kind and confidence metrics alongside symbols
+        #[arg(long = "show-resolution")]
+        show_resolution: bool,
     },
     /// Inspect details of a file or a symbol
     Node {
@@ -70,11 +76,17 @@ enum Commands {
         /// Specific line number to filter by (symbol mode only)
         #[arg(long)]
         line: Option<i64>,
+        /// Display resolution kind and confidence metrics alongside symbols
+        #[arg(long = "show-resolution")]
+        show_resolution: bool,
     },
     /// Explore the codebase using FTS and show relationships
     Explore {
         /// Query terms to search for nodes
         query: String,
+        /// Display resolution kind and confidence metrics alongside symbols
+        #[arg(long = "show-resolution")]
+        show_resolution: bool,
     },
 }
 
@@ -118,8 +130,19 @@ fn main() -> Result<(), Box<dyn Error>> {
         Commands::Search { query } => {
             commands::run_search(&current_dir, &query, json, no_tests)?;
         }
-        Commands::Callers { symbol } => {
-            commands::run_callers(&current_dir, &symbol, json, no_tests)?;
+        Commands::Callers {
+            symbol,
+            min_confidence,
+            show_resolution,
+        } => {
+            commands::run_callers(
+                &current_dir,
+                &symbol,
+                json,
+                no_tests,
+                min_confidence,
+                show_resolution,
+            )?;
         }
         Commands::Node {
             file,
@@ -129,6 +152,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             symbol,
             include_code,
             line,
+            show_resolution,
         } => {
             commands::run_node(
                 &current_dir,
@@ -141,10 +165,14 @@ fn main() -> Result<(), Box<dyn Error>> {
                 line,
                 json,
                 no_tests,
+                show_resolution,
             )?;
         }
-        Commands::Explore { query } => {
-            commands::run_explore(&current_dir, &query, json, no_tests)?;
+        Commands::Explore {
+            query,
+            show_resolution,
+        } => {
+            commands::run_explore(&current_dir, &query, json, no_tests, show_resolution)?;
         }
     }
 

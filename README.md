@@ -7,7 +7,7 @@
 ## 🚀 Key Features
 
 *   **Fast Indexing**: Scans and parses files recursively, using content hashes to only re-index modified files.
-*   **Call Graph Resolution**: Traces callers and callees structurally across files to map codebase dependencies.
+*   **Confidence-Aware Call Graph**: Traces callers and callees structurally across files. Each edge is resolved through a staged cascade (exact qualified hint → receiver type → package/namespace → same file → unique name) and tagged with a confidence score; ambiguous name-only matches are kept as unresolved references instead of polluting the graph with low-confidence edges.
 *   **FTS5 Full-Text Search**: Instantly searches signatures, symbols, and docstrings via SQLite's FTS5 engine.
 *   **Git Baseline Mapping**: Links indexed database states with Git metadata (current commit SHA, branch, status), ensuring queries are matched against a known codebase version.
 *   **Machine-Readable Output**: Accepts a global `--json` flag to emit structured JSON for programmatic consumption (diagnostics and progress go to `stderr`).
@@ -66,6 +66,8 @@ Trace who invokes/calls a specific function or constructor across the project:
 ```bash
 ochna callers <symbol_name_or_id>
 ```
+Filter weak edges with `--min-confidence <N>` (e.g. `80`), and append the
+resolution kind and confidence to each result with `--show-resolution`.
 
 ### 6. Inspect Symbol or File Node
 Inspect definitions, code slices, and local scopes:

@@ -13,6 +13,7 @@ pub(super) struct CLikeContext<'a> {
     pub(super) parent_is_type: bool,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn traverse_c_like<'a>(
     node: tree_sitter::Node<'a>,
     content: &'a str,
@@ -21,16 +22,26 @@ pub(super) fn traverse_c_like<'a>(
     calls: &mut Vec<RawCall>,
     context: CLikeContext<'a>,
     current_caller_id: Option<&str>,
+    local_ptrs: Option<&std::collections::HashSet<String>>,
 ) {
     let mut next_context = context;
     let mut next_caller_id = current_caller_id;
+    let mut next_local_ptrs = local_ptrs;
+    #[allow(unused_assignments)]
+    let mut local_ptrs_holder = std::collections::HashSet::new();
 
     #[allow(unused_assignments)]
     let mut qname_holder = String::new();
     #[allow(unused_assignments)]
     let mut id_holder = String::new();
 
-    match node.kind() {
+    let kind = node.kind();
+    if kind == "function_definition" {
+        local_ptrs_holder = collect_c_function_pointers(node, content);
+        next_local_ptrs = Some(&local_ptrs_holder);
+    }
+
+    match kind {
         "namespace_definition" => {
             if let Some(name_node) = node.child_by_field_name("name") {
                 let name = normalize_qualified_name(&text_for_node(name_node, content));
@@ -120,11 +131,37 @@ pub(super) fn traverse_c_like<'a>(
         "call_expression" => {
             if let Some(caller) = current_caller_id {
                 if let Some(func_node) = node.child_by_field_name("function") {
-                    calls.push(raw_call(
-                        caller,
-                        extract_c_call_target(func_node, content),
-                        node,
-                    ));
+                    let func_name = extract_c_call_target(func_node, content);
+                    let mut call = raw_call(caller, func_name.clone(), node);
+                    call.package_or_namespace =
+                        context.parent_qualified_name.map(|s| s.to_string());
+
+                    if func_node.kind() == "field_expression" {
+                        call.call_kind = Some("method".to_string());
+                        if let Some(obj_node) = func_node.child(0) {
+                            let receiver = text_for_node(obj_node, content).trim().to_string();
+                            if !receiver.is_empty() {
+                                call.receiver_expr = Some(receiver);
+                            }
+                        }
+                    } else if func_node.kind() == "identifier" {
+                        if let Some(ptrs) = next_local_ptrs {
+                            if ptrs.contains(&func_name) {
+                                call.call_kind = Some("indirect".to_string());
+                            }
+                        }
+                        if call.call_kind.is_none() {
+                            let is_all_uppercase = func_name
+                                .chars()
+                                .all(|c| !c.is_alphabetic() || c.is_uppercase());
+                            if is_all_uppercase && !func_name.is_empty() {
+                                call.call_kind = Some("macro".to_string());
+                            } else {
+                                call.call_kind = Some("function".to_string());
+                            }
+                        }
+                    }
+                    calls.push(call);
                 }
             }
         }
@@ -141,6 +178,7 @@ pub(super) fn traverse_c_like<'a>(
             calls,
             next_context,
             next_caller_id,
+            next_local_ptrs,
         );
     }
 }
@@ -188,4 +226,41 @@ fn extract_c_call_target(node: tree_sitter::Node, content: &str) -> String {
         _ => extract_c_declarator_name(node, content)
             .unwrap_or_else(|| normalize_qualified_name(&text_for_node(node, content))),
     }
+}
+
+fn collect_c_function_pointers(
+    node: tree_sitter::Node,
+    content: &str,
+) -> std::collections::HashSet<String> {
+    let mut ptrs = std::collections::HashSet::new();
+    fn walk(n: tree_sitter::Node, content: &str, ptrs: &mut std::collections::HashSet<String>) {
+        if n.kind() == "pointer_declarator" {
+            if let Some(parent) = n.parent() {
+                if parent.kind() == "parenthesized_declarator" {
+                    if let Some(id_node) = last_descendant_by_kind(
+                        parent,
+                        &[
+                            "qualified_identifier",
+                            "field_identifier",
+                            "type_identifier",
+                            "identifier",
+                        ],
+                    ) {
+                        let name = text_for_node(id_node, content).trim().to_string();
+                        if !name.is_empty() {
+                            ptrs.insert(name);
+                        }
+                    }
+                }
+            }
+        }
+        let mut cursor = n.walk();
+        for child in n.children(&mut cursor) {
+            if child.kind() != "function_definition" {
+                walk(child, content, ptrs);
+            }
+        }
+    }
+    walk(node, content, &mut ptrs);
+    ptrs
 }

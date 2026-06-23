@@ -17,20 +17,7 @@ fn query_nodes_by_like(conn: &Connection, pattern: &str) -> rusqlite::Result<Vec
     let mut rows = stmt.query([pattern, pattern, pattern])?;
     let mut nodes = Vec::new();
     while let Some(row) = rows.next()? {
-        nodes.push(db::Node {
-            id: row.get(0)?,
-            name: row.get(1)?,
-            kind: row.get(2)?,
-            qualified_name: row.get(3)?,
-            file_path: row.get(4)?,
-            start_line: row.get(5)?,
-            end_line: row.get(6)?,
-            start_column: row.get(7)?,
-            end_column: row.get(8)?,
-            signature: row.get(9)?,
-            doc_comment: row.get(10)?,
-            is_test: row.get(11)?,
-        });
+        nodes.push(db::map_row_to_node(row)?);
     }
     Ok(nodes)
 }
@@ -44,20 +31,7 @@ fn query_nodes_by_id_or_qual(conn: &Connection, symbol: &str) -> rusqlite::Resul
     let mut rows = stmt.query([symbol, symbol])?;
     let mut nodes = Vec::new();
     while let Some(row) = rows.next()? {
-        nodes.push(db::Node {
-            id: row.get(0)?,
-            name: row.get(1)?,
-            kind: row.get(2)?,
-            qualified_name: row.get(3)?,
-            file_path: row.get(4)?,
-            start_line: row.get(5)?,
-            end_line: row.get(6)?,
-            start_column: row.get(7)?,
-            end_column: row.get(8)?,
-            signature: row.get(9)?,
-            doc_comment: row.get(10)?,
-            is_test: row.get(11)?,
-        });
+        nodes.push(db::map_row_to_node(row)?);
     }
     Ok(nodes)
 }
@@ -72,20 +46,53 @@ fn open_db(workspace: &Path) -> Result<Connection, Box<dyn Error>> {
 }
 
 /// Emit a list of nodes: pretty JSON when `json`, otherwise one human line each.
-fn emit_nodes(nodes: &[db::Node], json: bool, empty_msg: &str) -> Result<(), Box<dyn Error>> {
+fn emit_nodes(
+    nodes: &[db::Node],
+    json: bool,
+    empty_msg: &str,
+    show_resolution: bool,
+) -> Result<(), Box<dyn Error>> {
     if json {
         println!("{}", serde_json::to_string_pretty(nodes)?);
     } else if nodes.is_empty() {
         println!("{}", empty_msg);
     } else {
         for n in nodes {
+            let res_suffix = if show_resolution {
+                if let (Some(ref res_kind), Some(conf)) = (&n.resolution_kind, n.confidence) {
+                    format!(" [resolution: {}, confidence: {}]", res_kind, conf)
+                } else {
+                    "".to_string()
+                }
+            } else {
+                "".to_string()
+            };
             println!(
-                "- {} ({}) - {}:{}",
-                n.name, n.kind, n.file_path, n.start_line
+                "- {} ({}) - {}:{}{}",
+                n.name, n.kind, n.file_path, n.start_line, res_suffix
             );
         }
     }
     Ok(())
+}
+
+fn process_related_nodes(nodes: &mut Vec<db::Node>, no_tests: bool) {
+    retain_non_tests(nodes, no_tests);
+    // Sort by id, then by confidence descending so dedup keeps highest confidence
+    nodes.sort_by(|a, b| {
+        a.id.cmp(&b.id).then_with(|| {
+            let a_conf = a.confidence.unwrap_or(-1);
+            let b_conf = b.confidence.unwrap_or(-1);
+            b_conf.cmp(&a_conf)
+        })
+    });
+    nodes.dedup_by(|a, b| a.id == b.id);
+    // Rank by confidence descending
+    nodes.sort_by(|a, b| {
+        let a_conf = a.confidence.unwrap_or(-1);
+        let b_conf = b.confidence.unwrap_or(-1);
+        b_conf.cmp(&a_conf).then_with(|| a.id.cmp(&b.id))
+    });
 }
 
 fn retain_non_tests(nodes: &mut Vec<db::Node>, no_tests: bool) {
@@ -137,7 +144,7 @@ pub fn run_search(
     }
 
     retain_non_tests(&mut nodes, no_tests);
-    emit_nodes(&nodes, json, "No matching nodes found.")
+    emit_nodes(&nodes, json, "No matching nodes found.", false)
 }
 
 pub fn run_callers(
@@ -145,6 +152,8 @@ pub fn run_callers(
     symbol: &str,
     json: bool,
     no_tests: bool,
+    min_confidence: Option<i64>,
+    show_resolution: bool,
 ) -> Result<(), Box<dyn Error>> {
     let conn = open_db(workspace)?;
 
@@ -164,6 +173,7 @@ pub fn run_callers(
             &[],
             json,
             &format!("Symbol '{}' not found in database.", symbol),
+            show_resolution,
         );
     }
 
@@ -173,13 +183,14 @@ pub fn run_callers(
             callers.extend(node_callers);
         }
     }
-    retain_non_tests(&mut callers, no_tests);
 
-    // Deduplicate callers
-    callers.sort_by(|a, b| a.id.cmp(&b.id));
-    callers.dedup_by(|a, b| a.id == b.id);
+    if let Some(min) = min_confidence {
+        callers.retain(|c| c.confidence.unwrap_or(0) >= min);
+    }
 
-    emit_nodes(&callers, json, "No callers found.")
+    process_related_nodes(&mut callers, no_tests);
+
+    emit_nodes(&callers, json, "No callers found.", show_resolution)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -194,6 +205,7 @@ pub fn run_node(
     line: Option<i64>,
     json: bool,
     no_tests: bool,
+    show_resolution: bool,
 ) -> Result<(), Box<dyn Error>> {
     let conn = open_db(workspace)?;
 
@@ -210,7 +222,7 @@ pub fn run_node(
 
             if symbols_only {
                 if json {
-                    return emit_nodes(&file_nodes, true, "");
+                    return emit_nodes(&file_nodes, true, "", show_resolution);
                 }
                 if file_nodes.is_empty() {
                     println!("No symbols found for file '{}'.", file_path);
@@ -254,9 +266,7 @@ pub fn run_node(
                     }
                 }
             }
-            retain_non_tests(&mut dependents, no_tests);
-            dependents.sort_by(|a, b| a.id.cmp(&b.id));
-            dependents.dedup_by(|a, b| a.id == b.id);
+            process_related_nodes(&mut dependents, no_tests);
 
             if json {
                 let lines: Vec<_> = (start..=end)
@@ -289,9 +299,20 @@ pub fn run_node(
                 println!("No external dependents.");
             } else {
                 for dep in dependents {
+                    let res_suffix = if show_resolution {
+                        if let (Some(ref res_kind), Some(conf)) =
+                            (&dep.resolution_kind, dep.confidence)
+                        {
+                            format!(" [resolution: {}, confidence: {}]", res_kind, conf)
+                        } else {
+                            "".to_string()
+                        }
+                    } else {
+                        "".to_string()
+                    };
                     println!(
-                        "- {} ({}) - {}:{}",
-                        dep.name, dep.kind, dep.file_path, dep.start_line
+                        "- {} ({}) - {}:{}{}",
+                        dep.name, dep.kind, dep.file_path, dep.start_line, res_suffix
                     );
                 }
             }
@@ -329,13 +350,9 @@ pub fn run_node(
                         None
                     };
                     let mut callers = db::find_callers(&conn, &node.id, None).unwrap_or_default();
-                    retain_non_tests(&mut callers, no_tests);
-                    callers.sort_by(|a, b| a.id.cmp(&b.id));
-                    callers.dedup_by(|a, b| a.id == b.id);
+                    process_related_nodes(&mut callers, no_tests);
                     let mut callees = db::find_callees(&conn, &node.id, None).unwrap_or_default();
-                    retain_non_tests(&mut callees, no_tests);
-                    callees.sort_by(|a, b| a.id.cmp(&b.id));
-                    callees.dedup_by(|a, b| a.id == b.id);
+                    process_related_nodes(&mut callees, no_tests);
                     out.push(json!({
                         "symbol": node,
                         "code": code,
@@ -389,23 +406,34 @@ pub fn run_node(
 
                 // Callers & Callees
                 let mut callers = db::find_callers(&conn, &node.id, None).unwrap_or_default();
-                retain_non_tests(&mut callers, no_tests);
-                callers.sort_by(|a, b| a.id.cmp(&b.id));
-                callers.dedup_by(|a, b| a.id == b.id);
+                process_related_nodes(&mut callers, no_tests);
 
                 let mut callees = db::find_callees(&conn, &node.id, None).unwrap_or_default();
-                retain_non_tests(&mut callees, no_tests);
-                callees.sort_by(|a, b| a.id.cmp(&b.id));
-                callees.dedup_by(|a, b| a.id == b.id);
+                process_related_nodes(&mut callees, no_tests);
 
                 section.push("\nCallers:".to_string());
                 if callers.is_empty() {
                     section.push("None".to_string());
                 } else {
                     for caller in callers {
+                        let res_suffix = if show_resolution {
+                            if let (Some(ref res_kind), Some(conf)) =
+                                (&caller.resolution_kind, caller.confidence)
+                            {
+                                format!(" [resolution: {}, confidence: {}]", res_kind, conf)
+                            } else {
+                                "".to_string()
+                            }
+                        } else {
+                            "".to_string()
+                        };
                         section.push(format!(
-                            "- {} ({}) - {}:{}",
-                            caller.name, caller.kind, caller.file_path, caller.start_line
+                            "- {} ({}) - {}:{}{}",
+                            caller.name,
+                            caller.kind,
+                            caller.file_path,
+                            caller.start_line,
+                            res_suffix
                         ));
                     }
                 }
@@ -415,9 +443,24 @@ pub fn run_node(
                     section.push("None".to_string());
                 } else {
                     for callee in callees {
+                        let res_suffix = if show_resolution {
+                            if let (Some(ref res_kind), Some(conf)) =
+                                (&callee.resolution_kind, callee.confidence)
+                            {
+                                format!(" [resolution: {}, confidence: {}]", res_kind, conf)
+                            } else {
+                                "".to_string()
+                            }
+                        } else {
+                            "".to_string()
+                        };
                         section.push(format!(
-                            "- {} ({}) - {}:{}",
-                            callee.name, callee.kind, callee.file_path, callee.start_line
+                            "- {} ({}) - {}:{}{}",
+                            callee.name,
+                            callee.kind,
+                            callee.file_path,
+                            callee.start_line,
+                            res_suffix
                         ));
                     }
                 }
@@ -440,6 +483,7 @@ pub fn run_explore(
     query: &str,
     json: bool,
     no_tests: bool,
+    show_resolution: bool,
 ) -> Result<(), Box<dyn Error>> {
     let conn = open_db(workspace)?;
 
@@ -483,13 +527,9 @@ pub fn run_explore(
             let mut symbols = Vec::new();
             for node in file_nodes {
                 let mut callers = db::find_callers(&conn, &node.id, None).unwrap_or_default();
-                retain_non_tests(&mut callers, no_tests);
-                callers.sort_by(|a, b| a.id.cmp(&b.id));
-                callers.dedup_by(|a, b| a.id == b.id);
+                process_related_nodes(&mut callers, no_tests);
                 let mut callees = db::find_callees(&conn, &node.id, None).unwrap_or_default();
-                retain_non_tests(&mut callees, no_tests);
-                callees.sort_by(|a, b| a.id.cmp(&b.id));
-                callees.dedup_by(|a, b| a.id == b.id);
+                process_related_nodes(&mut callees, no_tests);
                 symbols.push(json!({
                     "symbol": node,
                     "code": read_code_lines(workspace, node),
@@ -530,14 +570,10 @@ pub fn run_explore(
 
             // Query callers/callees
             let mut callers = db::find_callers(&conn, &node.id, None).unwrap_or_default();
-            retain_non_tests(&mut callers, no_tests);
-            callers.sort_by(|a, b| a.id.cmp(&b.id));
-            callers.dedup_by(|a, b| a.id == b.id);
+            process_related_nodes(&mut callers, no_tests);
 
             let mut callees = db::find_callees(&conn, &node.id, None).unwrap_or_default();
-            retain_non_tests(&mut callees, no_tests);
-            callees.sort_by(|a, b| a.id.cmp(&b.id));
-            callees.dedup_by(|a, b| a.id == b.id);
+            process_related_nodes(&mut callees, no_tests);
 
             output.push("  Relationships:".to_string());
             if callers.is_empty() {
@@ -545,9 +581,19 @@ pub fn run_explore(
             } else {
                 output.push("    Callers:".to_string());
                 for c in callers {
+                    let res_suffix = if show_resolution {
+                        if let (Some(ref res_kind), Some(conf)) = (&c.resolution_kind, c.confidence)
+                        {
+                            format!(" [resolution: {}, confidence: {}]", res_kind, conf)
+                        } else {
+                            "".to_string()
+                        }
+                    } else {
+                        "".to_string()
+                    };
                     output.push(format!(
-                        "      - {} ({}) - {}:{}",
-                        c.name, c.kind, c.file_path, c.start_line
+                        "      - {} ({}) - {}:{}{}",
+                        c.name, c.kind, c.file_path, c.start_line, res_suffix
                     ));
                 }
             }
@@ -557,9 +603,19 @@ pub fn run_explore(
             } else {
                 output.push("    Callees:".to_string());
                 for c in callees {
+                    let res_suffix = if show_resolution {
+                        if let (Some(ref res_kind), Some(conf)) = (&c.resolution_kind, c.confidence)
+                        {
+                            format!(" [resolution: {}, confidence: {}]", res_kind, conf)
+                        } else {
+                            "".to_string()
+                        }
+                    } else {
+                        "".to_string()
+                    };
                     output.push(format!(
-                        "      - {} ({}) - {}:{}",
-                        c.name, c.kind, c.file_path, c.start_line
+                        "      - {} ({}) - {}:{}{}",
+                        c.name, c.kind, c.file_path, c.start_line, res_suffix
                     ));
                 }
             }
@@ -589,6 +645,8 @@ mod tests {
             signature: None,
             doc_comment: None,
             is_test,
+            resolution_kind: None,
+            confidence: None,
         }
     }
 

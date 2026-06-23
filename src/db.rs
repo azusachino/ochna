@@ -42,6 +42,10 @@ pub struct Node {
     /// time). Defaults false; populated by `map_row_to_node` from the column.
     #[serde(default)]
     pub is_test: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resolution_kind: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub confidence: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -49,6 +53,8 @@ pub struct Edge {
     pub source_id: String,
     pub target_id: String,
     pub kind: String,
+    #[serde(default)]
+    pub resolution_kind: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -83,6 +89,11 @@ pub struct RawCall {
     pub callee_name: String,
     pub callee_simple: String,
     pub callee_scope: Option<String>,
+    pub call_kind: Option<String>,
+    pub receiver_expr: Option<String>,
+    pub receiver_type: Option<String>,
+    pub package_or_namespace: Option<String>,
+    pub import_hint: Option<String>,
     pub line: i64,
     pub column: i64,
 }
@@ -95,6 +106,11 @@ impl RawCall {
             callee_name,
             callee_simple,
             callee_scope,
+            call_kind: None,
+            receiver_expr: None,
+            receiver_type: None,
+            package_or_namespace: None,
+            import_hint: None,
             line,
             column,
         }
@@ -106,6 +122,30 @@ pub(crate) fn split_callee_name(callee_name: &str) -> (Option<String>, String) {
         (Some(scope.to_string()), simple.to_string())
     } else {
         (None, callee_name.to_string())
+    }
+}
+
+pub fn confidence_for_kind(resolution_kind: i64) -> i64 {
+    match resolution_kind {
+        0 => 30,  // name_only
+        1 => 60,  // same_file
+        2 => 80,  // namespace
+        3 => 80,  // package
+        4 => 90,  // receiver_type
+        5 => 100, // exact
+        _ => 30,
+    }
+}
+
+pub fn label_for_kind(resolution_kind: i64) -> &'static str {
+    match resolution_kind {
+        0 => "name_only",
+        1 => "same_file",
+        2 => "namespace",
+        3 => "package",
+        4 => "receiver_type",
+        5 => "exact",
+        _ => "unknown",
     }
 }
 
@@ -124,19 +164,26 @@ pub(crate) fn map_row_to_node(row: &rusqlite::Row) -> rusqlite::Result<Node> {
         signature: row.get(9)?,
         doc_comment: row.get(10)?,
         is_test: row.get(11)?,
+        resolution_kind: None,
+        confidence: None,
     })
 }
 
 pub(crate) fn map_row_to_raw_call(row: &rusqlite::Row) -> rusqlite::Result<RawCall> {
     let caller_id: String = row.get(0)?;
     let callee_name: String = row.get(1)?;
-    let line: i64 = row.get(4)?;
-    let column: i64 = row.get(5)?;
+    let line: i64 = row.get(9)?;
+    let column: i64 = row.get(10)?;
     let mut call = RawCall::new(caller_id, callee_name, line, column);
     if let Some(callee_simple) = row.get::<_, Option<String>>(2)? {
         call.callee_simple = callee_simple;
     }
     call.callee_scope = row.get(3)?;
+    call.call_kind = row.get(4)?;
+    call.receiver_expr = row.get(5)?;
+    call.receiver_type = row.get(6)?;
+    call.package_or_namespace = row.get(7)?;
+    call.import_hint = row.get(8)?;
     Ok(call)
 }
 
@@ -179,6 +226,8 @@ mod tests {
             signature: Some("fn main()".to_string()),
             doc_comment: Some("Main entrypoint".to_string()),
             is_test: false,
+            resolution_kind: None,
+            confidence: None,
         };
 
         let node_helper = Node {
@@ -194,6 +243,8 @@ mod tests {
             signature: Some("fn helper()".to_string()),
             doc_comment: Some("Helper function that does magic".to_string()),
             is_test: false,
+            resolution_kind: None,
+            confidence: None,
         };
 
         upsert_node(&conn, &node_main).unwrap();
@@ -212,6 +263,7 @@ mod tests {
             source_id: "src/main.rs::main".to_string(),
             target_id: "src/main.rs::helper".to_string(),
             kind: "calls".to_string(),
+            resolution_kind: 5,
         };
         upsert_edge(&conn, &edge_call).unwrap();
 
