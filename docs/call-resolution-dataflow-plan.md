@@ -50,8 +50,11 @@ parent diffs are unavailable. The reliable workflow was:
 | Netty (PR 16959) | traffic-shaping write leak fix | `callers releaseAndFailQueuedWrite` returned exactly the 3 `handlerRemoved` cleanups | overloaded/common Java method names still fan out at scale | name-only fallback is accurate only when the name is distinctive |
 | Linux (`strncpy` removal) | core API + arch impls deleted | confirmed `strncpy` gone from `lib/string.c`/`string.h`/FORTIFY while `strncpy_from_user` etc. remain | could not *explain* the removal from a symbol graph alone | current index models only the current tree; no prior tree / removed symbols |
 
-See `docs/experiments/kubernetes-pr-139848.md` for the full Kubernetes trace;
-the Netty and Linux runs are recorded in the project log.
+See the standalone experiment reports for the full traces:
+
+- `docs/experiments/kubernetes-pr-139848.md`
+- `docs/experiments/linux-strncpy-removal.md`
+- `docs/experiments/netty-pr-16959.md`
 
 The Netty `callers` result is the positive model for this redesign: when names
 are distinctive and ownership is clear, ochna already behaves like a strong
