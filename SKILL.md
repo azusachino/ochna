@@ -9,6 +9,15 @@ description: Use the ochna CLI to index, search, explore, and trace code call-gr
 
 Use `ochna` BEFORE resorting to standard tools like `rg` or `view_file`.
 
+**Confidence-aware edges**: call edges carry a resolution kind and a derived
+confidence score from a staged cascade — `exact` (100), `receiver_type` (90),
+`package` / `namespace` (80), `same_file` (60), `name_only` (30). Ambiguous
+name-only matches become unresolved references rather than low-confidence edges.
+Add `--show-resolution` to any query to see `[resolution: <kind>, confidence:
+<N>]`, and `--min-confidence <N>` to `callers` to drop weak edges (e.g.
+`--min-confidence 80` to keep only typed/qualified/namespace-anchored callers).
+Use this to cut noise on common method names in large Go/Java corpora.
+
 **Framework routes**: Java Spring MVC controllers are indexed as `route` nodes.
 `@Controller` / `@RestController` classes combine class-level
 `@RequestMapping` paths with method-level `@GetMapping`, `@PostMapping`,
@@ -66,6 +75,7 @@ points as graph nodes.
   ochna callers <symbol_name_or_id>
   ```
   _Lists all call sites of a function, constructor, or method._
+  _Add `--min-confidence <N>` to drop weak edges and `--show-resolution` to print each caller's resolution kind and confidence._
 - **Inspect File (Structure or Content)**:
   - _Show symbols only_:
     ```bash

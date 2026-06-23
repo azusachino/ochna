@@ -1,7 +1,7 @@
 # ochna Makefile
 # Provides industry-standard targets for building, testing, checking quality, and installing ochna.
 
-.PHONY: all build test fmt fmt-fix lint check setup install report clean
+.PHONY: all build test fmt fmt-fix lint check validate setup install report clean
 
 all: build
 
@@ -21,6 +21,9 @@ lint:
 	cargo clippy --all-targets -- -D warnings
 
 check: fmt lint
+
+# Alias for check; run before opening a PR.
+validate: check
 
 setup:
 	@echo "Initializing Git submodules..."
