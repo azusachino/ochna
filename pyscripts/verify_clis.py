@@ -138,6 +138,13 @@ def main() -> int:
         explore = run([ochna, "explore", "helper"], tmp).stdout
         assert "caller_one" in explore and "Callers:" in explore
 
+        # --- report.py analytics stays runnable against the live schema ---
+        # (its hotspots query joins edges.target_nid; guards against the schema
+        # drift that previously broke it silently). helper has two incoming calls.
+        report = run([sys.executable, str(repo_root / "pyscripts" / "report.py")], tmp)
+        assert "Hotspots" in report.stdout
+        assert "helper" in report.stdout
+
         # --- status --json gates non-zero when the index goes stale, then sync clears it ---
         (tmp / "src" / "lib.rs").write_text("pub fn helper() {}\n", encoding="utf-8")
         run(["git", "add", "-A"], tmp)

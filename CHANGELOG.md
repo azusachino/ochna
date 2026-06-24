@@ -22,13 +22,23 @@ machine-dependent.
 - Generated `.ochna/AGENT.md` pointer on `init`/`sync`, containing only index
   provenance plus links to `ochna howto` and `ochna status`.
 - `pyscripts/verify_clis.py` and `make verify-clis` / `make verify_clis` for a
-  `uv`-run real-binary smoke test of the new agent-facing CLI surfaces.
+  `uv`-run real-binary smoke test that asserts the *behavior* (not just exit
+  codes) of every agent-facing CLI surface, including `report.py`.
 
 ### Changed
 
 - `make validate` now runs static checks plus the Python CLI verifier.
 - `scripts/report.sh` reads the new `status --json` nested `counts` shape.
+- Consolidated docs around a single source of truth: `ochna howto` is the
+  canonical command/flag reference; `README.md` and `SKILL.md` no longer
+  duplicate the per-command walkthrough and point at `howto` instead.
 - Bumped crate version to `0.1.0`.
+
+### Fixed
+
+- `pyscripts/report.py` hotspots query referenced the pre-interning
+  `edges.target_id` column (removed in 0.0.4) and errored on the current schema;
+  it now joins `edges.target_nid` to `nodes`. Covered by `verify_clis.py`.
 
 ### Performance
 

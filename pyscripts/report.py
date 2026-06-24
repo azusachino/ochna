@@ -85,12 +85,16 @@ def main():
             print(f"  {kind.title():<15}: {count}")
 
         # 5. Top 5 Most Called Functions/Methods (In-degree)
+        # Edges store the interned node surrogate `target_nid`; join `nodes` to
+        # recover the human-readable `id` (the 0.0.4 interning redesign replaced
+        # the old text `target_id` column).
         print("\n--- Top 5 Most Referenced Symbols (Hotspots) ---")
         cursor.execute("""
-            SELECT target_id, COUNT(*) as incoming_calls
-            FROM edges
-            WHERE kind = 'calls'
-            GROUP BY target_id
+            SELECT n.id, COUNT(*) as incoming_calls
+            FROM edges e
+            JOIN nodes n ON e.target_nid = n.nid
+            WHERE e.kind = 'calls'
+            GROUP BY e.target_nid
             ORDER BY incoming_calls DESC
             LIMIT 5
         """)
