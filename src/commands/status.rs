@@ -113,7 +113,7 @@ pub fn run_status(workspace: &Path, json: bool) -> Result<(), Box<dyn Error>> {
                 "freshness": "unknown",
                 "indexed_sha": null,
                 "head_sha": head_sha,
-                "working_tree": working_tree.unwrap_or_else(|| "unknown".to_string()),
+                "working_tree": working_tree,
                 "action": "ochna init",
             });
             println!("{}", serde_json::to_string_pretty(&out)?);
@@ -175,7 +175,7 @@ pub fn run_status(workspace: &Path, json: bool) -> Result<(), Box<dyn Error>> {
             "freshness": freshness.as_str(),
             "indexed_sha": git_commit_sha.clone(),
             "head_sha": head_sha.clone(),
-            "working_tree": working_tree.unwrap_or_else(|| "unknown".to_string()),
+            "working_tree": working_tree,
             "action": action,
             "git": {
                 "commit_sha": git_commit_sha,

@@ -11,27 +11,44 @@ use std::path::Path;
 
 const HOWTO_TEXT: &str = r#"ochna usage flow
 
-1. Run `ochna status` first. If the index is stale, run `ochna sync`.
+1. Run `ochna status` first. If the index is stale, run `ochna sync` (or `ochna init` to build it).
 2. Search for an entry point with `ochna search <name>`.
 3. Trace incoming references with `ochna callers <name>`.
 4. Inspect a definition with `ochna node --symbol <name> --include-code`.
 5. Use `ochna explore <query>` when you want search results, snippets, and graph context together.
 
+Use ochna BEFORE recursive grep/read: prefer `search`/`callers`/`node` over `rg` for symbol lookups.
+
+Inspecting nodes
+
+- `ochna node --file <path> --symbols-only` — list the symbols defined in a file.
+- `ochna node --file <path> --offset <line> --limit <n>` — slice source by line range.
+- `ochna node --symbol <name> --include-code [--line <n>]` — definition plus source; `--line` disambiguates overloads.
+
+Call-edge confidence
+
+- Add `--show-resolution` to any query to print each edge's resolution kind and confidence.
+- Add `--min-confidence <N>` to `callers` to drop weak edges. Cascade: exact 100, receiver_type 90, package/namespace 80, same_file 60, name_only 30. Use `--min-confidence 80` to cut noise on common method names.
+
 Operational facts
 
 - The database is resolved from the current working directory at `.ochna/ochna.db`.
 - There is no `--workspace` flag; `cd` into the project or submodule before querying.
-- Add global `--json` for machine-readable stdout.
-- Add global `--no-tests` to hide symbols classified from test paths.
+- Add global `--json` for machine-readable stdout; add global `--no-tests` to hide symbols classified from test paths.
+- `init`/`sync` skip library/generated dirs (target, node_modules, .venv, vendor, build, dist) by default; pass `--include-library` to index them.
 - Diagnostics and progress go to stderr; JSON stdout is kept parseable.
 "#;
 
 #[derive(Serialize)]
 struct HowtoDescriptor<'a> {
-    flow: [&'a str; 4],
+    flow: [&'a str; 5],
+    rule: &'a str,
     commands: HowtoCommands<'a>,
+    node_modes: [&'a str; 3],
+    flags: HowtoFlags<'a>,
+    confidence_cascade: [&'a str; 5],
     globals: [&'a str; 2],
-    notes: [&'a str; 5],
+    notes: [&'a str; 3],
 }
 
 #[derive(Serialize)]
@@ -46,10 +63,20 @@ struct HowtoCommands<'a> {
     sync: &'a str,
 }
 
+#[derive(Serialize)]
+struct HowtoFlags<'a> {
+    show_resolution: &'a str,
+    min_confidence: &'a str,
+    include_library: &'a str,
+    no_tests: &'a str,
+    json: &'a str,
+}
+
 pub fn run_howto(json: bool) -> Result<(), Box<dyn Error>> {
     if json {
         let descriptor = HowtoDescriptor {
-            flow: ["status", "search", "callers", "node"],
+            flow: ["status", "search", "callers", "node", "explore"],
+            rule: "use ochna before recursive grep/read; prefer search/callers/node over rg for symbol lookups",
             commands: HowtoCommands {
                 status: "check whether the local index exists, matches the binary schema, and is fresh enough to trust",
                 search: "fuzzy and full-text symbol lookup",
@@ -60,13 +87,30 @@ pub fn run_howto(json: bool) -> Result<(), Box<dyn Error>> {
                 init: "create .ochna/ochna.db and build the initial index",
                 sync: "incrementally update the existing index after source changes",
             },
+            node_modes: [
+                "node --file <path> --symbols-only: list the symbols defined in a file",
+                "node --file <path> --offset <line> --limit <n>: slice source by line range",
+                "node --symbol <name> --include-code [--line <n>]: definition plus source; --line disambiguates overloads",
+            ],
+            flags: HowtoFlags {
+                show_resolution: "print each edge's resolution kind and confidence on any query",
+                min_confidence: "drop weak callers edges below <N> (e.g. 80 to keep only typed/qualified matches)",
+                include_library: "index library/generated dirs (target, node_modules, .venv, vendor, build, dist) on init/sync",
+                no_tests: "hide symbols classified from test paths",
+                json: "emit machine-readable JSON on stdout",
+            },
+            confidence_cascade: [
+                "exact=100",
+                "receiver_type=90",
+                "package_or_namespace=80",
+                "same_file=60",
+                "name_only=30",
+            ],
             globals: ["--json", "--no-tests"],
             notes: [
-                "run `ochna status` before trusting query results",
-                "the database resolves from the current working directory",
-                "there is no `--workspace` flag",
-                "use `ochna node --symbol <name> --include-code` to inspect definitions",
-                "prefer `ochna explore <query>` for a combined investigation view",
+                "the database resolves from the current working directory (.ochna/ochna.db)",
+                "there is no `--workspace` flag; cd into the project or submodule before querying",
+                "diagnostics and progress go to stderr; JSON stdout stays parseable",
             ],
         };
         println!("{}", serde_json::to_string_pretty(&descriptor)?);
