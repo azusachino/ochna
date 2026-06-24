@@ -23,7 +23,9 @@ pub use refs::{
     delete_unresolved_refs_for_source_id, get_unresolved_source_ids_by_specifier_simple,
     insert_unresolved_ref,
 };
-pub use schema::{create_node_fts_triggers, drop_node_fts_triggers, init_schema, rebuild_node_fts};
+pub use schema::{
+    create_node_fts_triggers, drop_node_fts_triggers, init_schema, rebuild_node_fts, SCHEMA_VERSION,
+};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Node {

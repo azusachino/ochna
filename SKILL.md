@@ -29,6 +29,8 @@ points as graph nodes.
 
 **Machine-readable output**: every query command accepts a global `--json` flag that emits structured JSON on stdout (full node records with `id`, `qualified_name`, `signature`, line/column spans, plus callers/callees). Diagnostics and progress go to stderr, so `--json` stdout is always clean to parse. Prefer `--json` when consuming output programmatically. Verbosity is controlled by `RUST_LOG` (default `info`).
 
+**Self-describing workflow**: run `ochna howto` when you need the canonical query flow. Run `ochna howto --json` for a machine-readable capability descriptor. `ochna init`/`ochna sync` also write `.ochna/AGENT.md`, a generated pointer with index provenance and links back to `ochna howto` and `ochna status`.
+
 ## Commands Reference
 
 ### 1. Indexing & Health
@@ -49,6 +51,13 @@ points as graph nodes.
   ```bash
   ochna status
   ```
+  _Use `ochna status --json` as a preflight gate before automated queries. It reports `ok`, schema match, counts, freshness, Git baseline, and the next `action`; stale or unusable indexes exit non-zero._
+- **Learn Query Workflow**:
+  ```bash
+  ochna howto
+  ochna howto --json
+  ```
+  _Prints the recommended search -> callers -> node flow and operational facts such as cwd-based database resolution._
 - **List Tracked Files**:
   ```bash
   ochna files

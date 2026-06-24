@@ -11,6 +11,7 @@
 *   **FTS5 Full-Text Search**: Instantly searches signatures, symbols, and docstrings via SQLite's FTS5 engine.
 *   **Git Baseline Mapping**: Links indexed database states with Git metadata (current commit SHA, branch, status), ensuring queries are matched against a known codebase version.
 *   **Machine-Readable Output**: Accepts a global `--json` flag to emit structured JSON for programmatic consumption (diagnostics and progress go to `stderr`).
+*   **Agent-Friendly Workflow Guide**: `ochna howto` teaches the recommended search -> callers -> node investigation flow and emits a JSON capability descriptor for automation.
 
 ---
 
@@ -53,15 +54,27 @@ Display details about the indexed database and the Git commit baseline:
 ```bash
 ochna status
 ```
+Use JSON output as a preflight gate before automated queries:
+```bash
+ochna status --json
+```
+If the index is stale or unusable, the JSON includes an `action` such as `ochna sync` and the command exits non-zero.
 
-### 4. Search Symbols
+### 4. Learn the Query Flow
+Print the recommended investigation workflow:
+```bash
+ochna howto
+ochna howto --json
+```
+
+### 5. Search Symbols
 Search for symbols (names, comments, signatures) using full-text search:
 ```bash
 ochna search <query_term>
 ```
 Query commands accept global `--no-tests` to hide symbols classified from test paths.
 
-### 5. Trace Callers
+### 6. Trace Callers
 Trace who invokes/calls a specific function or constructor across the project:
 ```bash
 ochna callers <symbol_name_or_id>
@@ -69,7 +82,7 @@ ochna callers <symbol_name_or_id>
 Filter weak edges with `--min-confidence <N>` (e.g. `80`), and append the
 resolution kind and confidence to each result with `--show-resolution`.
 
-### 6. Inspect Symbol or File Node
+### 7. Inspect Symbol or File Node
 Inspect definitions, code slices, and local scopes:
 ```bash
 # View metadata and implementation source of a symbol
@@ -79,7 +92,7 @@ ochna node --symbol <name> --include-code
 ochna node --file <path_to_file> --symbols-only
 ```
 
-### 7. Explore Codebase
+### 8. Explore Codebase
 Unified view combining search, file scopes, code snippets, and call graph relationships:
 ```bash
 ochna explore <query_term>

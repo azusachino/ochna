@@ -3,10 +3,78 @@
 
 use crate::db;
 use rusqlite::Connection;
+use serde::Serialize;
 use serde_json::json;
 use std::error::Error;
 use std::fs;
 use std::path::Path;
+
+const HOWTO_TEXT: &str = r#"ochna usage flow
+
+1. Run `ochna status` first. If the index is stale, run `ochna sync`.
+2. Search for an entry point with `ochna search <name>`.
+3. Trace incoming references with `ochna callers <name>`.
+4. Inspect a definition with `ochna node --symbol <name> --include-code`.
+5. Use `ochna explore <query>` when you want search results, snippets, and graph context together.
+
+Operational facts
+
+- The database is resolved from the current working directory at `.ochna/ochna.db`.
+- There is no `--workspace` flag; `cd` into the project or submodule before querying.
+- Add global `--json` for machine-readable stdout.
+- Add global `--no-tests` to hide symbols classified from test paths.
+- Diagnostics and progress go to stderr; JSON stdout is kept parseable.
+"#;
+
+#[derive(Serialize)]
+struct HowtoDescriptor<'a> {
+    flow: [&'a str; 4],
+    commands: HowtoCommands<'a>,
+    globals: [&'a str; 2],
+    notes: [&'a str; 5],
+}
+
+#[derive(Serialize)]
+struct HowtoCommands<'a> {
+    status: &'a str,
+    search: &'a str,
+    callers: &'a str,
+    node: &'a str,
+    explore: &'a str,
+    files: &'a str,
+    init: &'a str,
+    sync: &'a str,
+}
+
+pub fn run_howto(json: bool) -> Result<(), Box<dyn Error>> {
+    if json {
+        let descriptor = HowtoDescriptor {
+            flow: ["status", "search", "callers", "node"],
+            commands: HowtoCommands {
+                status: "check whether the local index exists, matches the binary schema, and is fresh enough to trust",
+                search: "fuzzy and full-text symbol lookup",
+                callers: "reverse call-edge lookup for a symbol",
+                node: "inspect a file, symbol metadata, and optionally source code",
+                explore: "combined search, snippets, callers, and callees view",
+                files: "list indexed files and per-file symbol counts",
+                init: "create .ochna/ochna.db and build the initial index",
+                sync: "incrementally update the existing index after source changes",
+            },
+            globals: ["--json", "--no-tests"],
+            notes: [
+                "run `ochna status` before trusting query results",
+                "the database resolves from the current working directory",
+                "there is no `--workspace` flag",
+                "use `ochna node --symbol <name> --include-code` to inspect definitions",
+                "prefer `ochna explore <query>` for a combined investigation view",
+            ],
+        };
+        println!("{}", serde_json::to_string_pretty(&descriptor)?);
+    } else {
+        println!("{}", HOWTO_TEXT.trim_end());
+    }
+    Ok(())
+}
 
 fn query_nodes_by_like(conn: &Connection, pattern: &str) -> rusqlite::Result<Vec<db::Node>> {
     let mut stmt = conn.prepare(
