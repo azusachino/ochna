@@ -29,77 +29,28 @@ points as graph nodes.
 
 **Machine-readable output**: every query command accepts a global `--json` flag that emits structured JSON on stdout (full node records with `id`, `qualified_name`, `signature`, line/column spans, plus callers/callees). Diagnostics and progress go to stderr, so `--json` stdout is always clean to parse. Prefer `--json` when consuming output programmatically. Verbosity is controlled by `RUST_LOG` (default `info`).
 
-## Commands Reference
+**Self-describing workflow**: run `ochna howto` when you need the canonical query flow. Run `ochna howto --json` for a machine-readable capability descriptor. `ochna init`/`ochna sync` also write `.ochna/AGENT.md`, a generated pointer with index provenance and links back to `ochna howto` and `ochna status`.
 
-### 1. Indexing & Health
+## Command Surface
 
-- **Initialize Index**:
-  ```bash
-  ochna init
-  ```
-  _Call this at the start of a project/session to create the SQLite index._
-  _By default this skips library/generated directories (`target`, `node_modules`, `.venv`, `vendor`, `build`, `dist`); pass `--include-library` to index them._
-- **Update/Sync Index**:
-  ```bash
-  ochna sync
-  ```
-  _Call this after editing files to incrementally sync code changes into the SQLite index._
-  _Use `ochna sync --include-library` when generated/library directories should stay in the index._
-- **Check Index Statistics**:
-  ```bash
-  ochna status
-  ```
-- **List Tracked Files**:
-  ```bash
-  ochna files
-  ```
+Run `ochna howto` (or `ochna howto --json` for a capability descriptor) for the
+full, always-current command and flag reference — it is the single source of
+truth and stays in sync with the installed binary, so this playbook does not
+re-list every command. The flow is `status` → `search` → `callers` → `node`,
+with `explore` for a combined view. Judgment notes specific to this playbook:
 
-### 2. Search & Exploration
+- `--show-resolution` / `--min-confidence <N>` on `callers` apply the confidence
+  cascade above; use `--min-confidence 80` to cut noise on common Go/Java method
+  names.
+- `ochna node --file <path> --symbols-only` and `--offset/--limit` replace
+  `view_file` for structural reads; `--include-code [--line <n>]` returns a
+  symbol's source and disambiguates overloads.
+- `--include-library` on `init`/`sync` indexes vendored/generated dirs;
+  `--no-tests` hides test-path symbols on any query.
+- Source-checkout maintenance: `make verify-clis` drives the real binary and
+  asserts behavior of every agent-facing surface.
 
-- **Concept/Symbol Search**:
-  ```bash
-  ochna search <query_keyword_or_name>
-  ```
-  _Performs FTS (Full-Text Search) and name matches. Returns matching symbols with their file paths and line numbers._
-  _Add global `--no-tests` to query commands (`search`, `callers`, `node`, `explore`) to hide symbols classified from test paths._
-- **Unified Exploration**:
-  ```bash
-  ochna explore <query>
-  ```
-  _Search for matching nodes, groups them by file path, prints their source code snippets, and displays caller/callee relationships in one command._
-
-### 3. Navigation & Tracing
-
-- **Find Callers (Incoming References)**:
-  ```bash
-  ochna callers <symbol_name_or_id>
-  ```
-  _Lists all call sites of a function, constructor, or method._
-  _Add `--min-confidence <N>` to drop weak edges and `--show-resolution` to print each caller's resolution kind and confidence._
-- **Inspect File (Structure or Content)**:
-  - _Show symbols only_:
-    ```bash
-    ochna node --file <path> --symbols-only
-    ```
-  - _Slice source code_:
-    ```bash
-    ochna node --file <path> --offset <start_line> --limit <line_count>
-    ```
-- **Inspect Symbol (Definition & Context)**:
-  - _Metadata only_:
-    ```bash
-    ochna node --symbol <name>
-    ```
-  - _Metadata & implementation source_:
-    ```bash
-    ochna node --symbol <name> --include-code
-    ```
-  - _Disambiguate by definition line_:
-    ```bash
-    ochna node --symbol <name> --include-code --line <line_number>
-    ```
-
-### 4. Python Database Analysis
+## Python Database Analysis
 
 For custom queries or advanced analytics directly from the SQLite database:
 

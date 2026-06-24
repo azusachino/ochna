@@ -7,7 +7,7 @@ use rusqlite::Connection;
 
 /// Current on-disk schema version. Bump when a change is not backward
 /// compatible; `init_schema` then drops the data tables and the caller rebuilds.
-const SCHEMA_VERSION: i64 = 5;
+pub const SCHEMA_VERSION: i64 = 5;
 
 // `nid` aliases rowid (the compact surrogate referenced by every edge/call);
 // `id` keeps the human-readable "file::symbol" key, UNIQUE so resolution and

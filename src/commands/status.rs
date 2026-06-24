@@ -5,6 +5,7 @@ use rusqlite::Connection;
 use serde_json::json;
 use std::error::Error;
 use std::path::Path;
+use std::process::Command;
 
 struct FileRow {
     path: String,
@@ -14,11 +15,109 @@ struct FileRow {
     symbol_count: i64,
 }
 
+#[derive(Debug, PartialEq)]
+enum Freshness {
+    Fresh,
+    Stale,
+    Unknown,
+}
+
+impl Freshness {
+    fn as_str(&self) -> &'static str {
+        match self {
+            Freshness::Fresh => "fresh",
+            Freshness::Stale => "stale",
+            Freshness::Unknown => "unknown",
+        }
+    }
+}
+
+fn live_git_head(workspace: &Path) -> Option<String> {
+    Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .current_dir(workspace)
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+fn live_git_status(workspace: &Path) -> Option<String> {
+    Command::new("git")
+        .args(["status", "--porcelain", "--", ".", ":(exclude).ochna"])
+        .current_dir(workspace)
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| {
+            if String::from_utf8_lossy(&o.stdout).trim().is_empty() {
+                "clean".to_string()
+            } else {
+                "dirty".to_string()
+            }
+        })
+}
+
+fn read_schema_version(conn: &Connection) -> Option<i64> {
+    conn.query_row("SELECT MAX(version) FROM schema_versions", [], |row| {
+        row.get(0)
+    })
+    .ok()
+    .flatten()
+}
+
+fn classify_freshness(
+    indexed_sha: &str,
+    indexed_status: &str,
+    head_sha: Option<&str>,
+    working_tree: Option<&str>,
+) -> Freshness {
+    let Some(head_sha) = head_sha else {
+        return Freshness::Unknown;
+    };
+    let Some(working_tree) = working_tree else {
+        return Freshness::Unknown;
+    };
+    if indexed_sha == "N/A" || indexed_sha.is_empty() {
+        return Freshness::Unknown;
+    }
+    if indexed_sha == head_sha && indexed_status == "clean" && working_tree == "clean" {
+        Freshness::Fresh
+    } else {
+        Freshness::Stale
+    }
+}
+
 /// The `status` command:
 /// - Displays statistics: number of files, nodes, and edges currently indexed in the database.
 pub fn run_status(workspace: &Path, json: bool) -> Result<(), Box<dyn Error>> {
     let db_path = workspace.join(".ochna").join("ochna.db");
     if !db_path.exists() {
+        if json {
+            let head_sha = live_git_head(workspace);
+            let working_tree = live_git_status(workspace);
+            let out = json!({
+                "ok": false,
+                "db_present": false,
+                "schema": {
+                    "expected": db::SCHEMA_VERSION,
+                    "found": null,
+                    "match": false,
+                },
+                "counts": {
+                    "files": 0,
+                    "nodes": 0,
+                    "edges": 0,
+                },
+                "freshness": "unknown",
+                "indexed_sha": null,
+                "head_sha": head_sha,
+                "working_tree": working_tree,
+                "action": "ochna init",
+            });
+            println!("{}", serde_json::to_string_pretty(&out)?);
+        }
         return Err("Database not initialized. Run the 'init' command first.".into());
     }
 
@@ -40,12 +139,44 @@ pub fn run_status(workspace: &Path, json: bool) -> Result<(), Box<dyn Error>> {
         db::get_project_metadata(&conn, "git_status")?.unwrap_or_else(|| "N/A".to_string());
     let indexed_at =
         db::get_project_metadata(&conn, "indexed_at")?.unwrap_or_else(|| "N/A".to_string());
+    let found_schema = read_schema_version(&conn);
+    let schema_match = found_schema == Some(db::SCHEMA_VERSION);
+    let head_sha = live_git_head(workspace);
+    let working_tree = live_git_status(workspace);
+    let freshness = classify_freshness(
+        &git_commit_sha,
+        &git_status,
+        head_sha.as_deref(),
+        working_tree.as_deref(),
+    );
+    let ok = schema_match && nodes_count > 0 && freshness != Freshness::Stale;
+    let action = if !schema_match || nodes_count == 0 {
+        "ochna init"
+    } else if freshness == Freshness::Stale {
+        "ochna sync"
+    } else {
+        "none"
+    };
 
     if json {
         let out = json!({
-            "files": files_count,
-            "nodes": nodes_count,
-            "edges": edges_count,
+            "ok": ok,
+            "db_present": true,
+            "schema": {
+                "expected": db::SCHEMA_VERSION,
+                "found": found_schema,
+                "match": schema_match,
+            },
+            "counts": {
+                "files": files_count,
+                "nodes": nodes_count,
+                "edges": edges_count,
+            },
+            "freshness": freshness.as_str(),
+            "indexed_sha": git_commit_sha.clone(),
+            "head_sha": head_sha.clone(),
+            "working_tree": working_tree,
+            "action": action,
             "git": {
                 "commit_sha": git_commit_sha,
                 "commit_subject": git_commit_subject,
@@ -56,6 +187,9 @@ pub fn run_status(workspace: &Path, json: bool) -> Result<(), Box<dyn Error>> {
             "indexed_at": indexed_at,
         });
         println!("{}", serde_json::to_string_pretty(&out)?);
+        if !ok {
+            return Err(format!("Index is not ready. Run '{action}'.").into());
+        }
         return Ok(());
     }
 

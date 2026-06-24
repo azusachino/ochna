@@ -1,7 +1,7 @@
 # ochna Makefile
 # Provides industry-standard targets for building, testing, checking quality, and installing ochna.
 
-.PHONY: all build test fmt fmt-fix lint check validate setup install report clean
+.PHONY: all build test fmt fmt-fix lint check validate verify-clis verify_clis setup install report clean
 
 all: build
 
@@ -22,8 +22,13 @@ lint:
 
 check: fmt lint
 
-# Alias for check; run before opening a PR.
-validate: check
+# Run before opening a PR: static checks plus CLI smoke tests.
+validate: check verify-clis
+
+verify-clis: build
+	UV_CACHE_DIR=.uv-cache uv run python pyscripts/verify_clis.py
+
+verify_clis: verify-clis
 
 setup:
 	@echo "Initializing Git submodules..."

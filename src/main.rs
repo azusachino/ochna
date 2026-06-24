@@ -33,6 +33,8 @@ enum Commands {
         #[arg(long = "include-library")]
         include_library: bool,
     },
+    /// Print the recommended ochna workflow for humans or agents
+    Howto,
     /// Display index statistics
     Status,
     /// List indexed files with metadata
@@ -120,6 +122,9 @@ fn main() -> Result<(), Box<dyn Error>> {
                 return Err("Database not initialized. Please run 'ochna init' first.".into());
             }
             commands::run_init(&current_dir, include_library)?;
+        }
+        Commands::Howto => {
+            commands::run_howto(json)?;
         }
         Commands::Status => {
             commands::run_status(&current_dir, json)?;
