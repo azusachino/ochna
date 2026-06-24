@@ -67,14 +67,22 @@ ochna howto
 ochna howto --json
 ```
 
-### 5. Search Symbols
+### 5. Verify CLI Surfaces
+From a source checkout, run the release smoke test for agent-facing commands:
+```bash
+make verify-clis
+```
+The target runs `uv run python pyscripts/verify_clis.py` against the release
+binary.
+
+### 6. Search Symbols
 Search for symbols (names, comments, signatures) using full-text search:
 ```bash
 ochna search <query_term>
 ```
 Query commands accept global `--no-tests` to hide symbols classified from test paths.
 
-### 6. Trace Callers
+### 7. Trace Callers
 Trace who invokes/calls a specific function or constructor across the project:
 ```bash
 ochna callers <symbol_name_or_id>
@@ -82,7 +90,7 @@ ochna callers <symbol_name_or_id>
 Filter weak edges with `--min-confidence <N>` (e.g. `80`), and append the
 resolution kind and confidence to each result with `--show-resolution`.
 
-### 7. Inspect Symbol or File Node
+### 8. Inspect Symbol or File Node
 Inspect definitions, code slices, and local scopes:
 ```bash
 # View metadata and implementation source of a symbol
@@ -92,7 +100,7 @@ ochna node --symbol <name> --include-code
 ochna node --file <path_to_file> --symbols-only
 ```
 
-### 8. Explore Codebase
+### 9. Explore Codebase
 Unified view combining search, file scopes, code snippets, and call graph relationships:
 ```bash
 ochna explore <query_term>

@@ -45,7 +45,7 @@ fn live_git_head(workspace: &Path) -> Option<String> {
 
 fn live_git_status(workspace: &Path) -> Option<String> {
     Command::new("git")
-        .args(["status", "--porcelain"])
+        .args(["status", "--porcelain", "--", ".", ":(exclude).ochna"])
         .current_dir(workspace)
         .output()
         .ok()

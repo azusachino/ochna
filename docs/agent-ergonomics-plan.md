@@ -6,7 +6,7 @@ ergonomics and one optional capability, not a second store. (See the standing
 decision: SQLite point queries are 2–4 ms even on the 1.25 GB linux index, so no
 format change is justified for speed.)
 
-Date: 2026-06-24. Status: workstreams 1 and 2 implemented; workstreams 3 and 4 deferred.
+Date: 2026-06-24. Status: workstreams 1 and 2 implemented for 0.1.0; workstreams 3 and 4 deferred.
 
 ## Framing
 

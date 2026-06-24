@@ -57,7 +57,7 @@ for pair in $langs; do
 
   json="$(cd "$dir" && "$bin" status --json)"
   echo "$json" | jq -r --arg g "$giant" --arg l "$lang" --arg s "$secs" --arg r "$resync" \
-    '"| \($g) | \($l) | \(.git.commit_sha[0:12]) | \(.files) | \(.nodes) | \(.edges) | \($s) | \($r) |"' \
+    '"| \($g) | \($l) | \(.git.commit_sha[0:12]) | \(.counts.files) | \(.counts.nodes) | \(.counts.edges) | \($s) | \($r) |"' \
     >>"$out"
 done
 

@@ -146,7 +146,7 @@ fn get_git_info(
         .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string());
 
     let status = Command::new("git")
-        .args(["status", "--porcelain"])
+        .args(["status", "--porcelain", "--", ".", ":(exclude).ochna"])
         .current_dir(workspace)
         .output()
         .ok()

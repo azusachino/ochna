@@ -58,6 +58,11 @@ points as graph nodes.
   ochna howto --json
   ```
   _Prints the recommended search -> callers -> node flow and operational facts such as cwd-based database resolution._
+- **Verify CLI Surfaces (source checkout)**:
+  ```bash
+  make verify-clis
+  ```
+  _Runs the `uv`-backed Python real-binary smoke tests for `howto`, `status --json`, stale preflight exit behavior, and generated `.ochna/AGENT.md`._
 - **List Tracked Files**:
   ```bash
   ochna files

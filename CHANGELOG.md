@@ -9,6 +9,32 @@ Each release carries a **Performance** note for indexing-pipeline changes.
 test giants (`make report`); the numbers quoted here are directional and
 machine-dependent.
 
+## [0.1.0] — 2026-06-24
+
+### Added
+
+- `ochna howto`, a self-describing workflow command for humans and agents. It
+  prints the recommended `status` -> `search` -> `callers` -> `node` flow and
+  emits a structured capability descriptor with global `--json`.
+- `status --json` preflight verdicts with `ok`, `db_present`, schema match,
+  nested counts, freshness, indexed/live Git state, and a single next `action`.
+  Stale or unusable indexes exit non-zero so automation can gate on freshness.
+- Generated `.ochna/AGENT.md` pointer on `init`/`sync`, containing only index
+  provenance plus links to `ochna howto` and `ochna status`.
+- `pyscripts/verify_clis.py` and `make verify-clis` / `make verify_clis` for a
+  `uv`-run real-binary smoke test of the new agent-facing CLI surfaces.
+
+### Changed
+
+- `make validate` now runs static checks plus the Python CLI verifier.
+- `scripts/report.sh` reads the new `status --json` nested `counts` shape.
+- Bumped crate version to `0.1.0`.
+
+### Performance
+
+- No indexing-pipeline changes; benchmark counts and timings should be stable
+  against `0.0.5`.
+
 ## [0.0.5] — 2026-06-23
 
 ### Added
@@ -129,6 +155,7 @@ no-op re-sync **~3s**. See `BENCHMARK.md` for the full table.
 - Cross-file call-edge resolution with `unresolved_refs`; `--json` output and
   tracing diagnostics to stderr.
 
+[0.1.0]: https://github.com/azusachino/ochna/compare/v0.0.5...v0.1.0
 [0.0.5]: https://github.com/azusachino/ochna/compare/v0.0.4...v0.0.5
 [0.0.4]: https://github.com/azusachino/ochna/compare/v0.0.3...v0.0.4
 [0.0.3]: https://github.com/azusachino/ochna/compare/v0.0.2...v0.0.3
