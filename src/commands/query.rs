@@ -179,9 +179,12 @@ fn emit_nodes(
             } else {
                 "".to_string()
             };
+            // Prefer the qualified name (e.g. `Type::method`) so symbols that
+            // share a bare name across packages are distinguishable at a glance.
+            let display_name = n.qualified_name.as_deref().unwrap_or(&n.name);
             println!(
                 "- {} ({}) - {}:{}{}",
-                n.name, n.kind, n.file_path, n.start_line, res_suffix
+                display_name, n.kind, n.file_path, n.start_line, res_suffix
             );
         }
     }
