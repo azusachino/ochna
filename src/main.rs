@@ -59,6 +59,9 @@ enum Commands {
         /// Display resolution kind and confidence metrics alongside symbols
         #[arg(long = "show-resolution")]
         show_resolution: bool,
+        /// Only resolve target symbols whose file path starts with this prefix
+        #[arg(long = "in")]
+        in_path: Option<String>,
     },
     /// Find callees of a given symbol
     Callees {
@@ -70,6 +73,9 @@ enum Commands {
         /// Display resolution kind and confidence metrics alongside symbols
         #[arg(long = "show-resolution")]
         show_resolution: bool,
+        /// Only resolve target symbols whose file path starts with this prefix
+        #[arg(long = "in")]
+        in_path: Option<String>,
     },
     /// Inspect details of a file or a symbol
     Node {
@@ -158,6 +164,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             symbol,
             min_confidence,
             show_resolution,
+            in_path,
         } => {
             commands::run_callers(
                 &current_dir,
@@ -166,12 +173,14 @@ fn main() -> Result<(), Box<dyn Error>> {
                 no_tests,
                 min_confidence,
                 show_resolution,
+                in_path.as_deref(),
             )?;
         }
         Commands::Callees {
             symbol,
             min_confidence,
             show_resolution,
+            in_path,
         } => {
             commands::run_callees(
                 &current_dir,
@@ -180,6 +189,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 no_tests,
                 min_confidence,
                 show_resolution,
+                in_path.as_deref(),
             )?;
         }
         Commands::Node {

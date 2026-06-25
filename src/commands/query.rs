@@ -266,6 +266,7 @@ pub fn run_callers(
     no_tests: bool,
     min_confidence: Option<i64>,
     show_resolution: bool,
+    in_path: Option<&str>,
 ) -> Result<(), Box<dyn Error>> {
     let conn = open_db(workspace)?;
 
@@ -279,6 +280,11 @@ pub fn run_callers(
         }
     }
     retain_non_tests(&mut target_nodes, no_tests);
+
+    // Filter by path prefix if --in was specified
+    if let Some(prefix) = in_path {
+        target_nodes.retain(|node| node.file_path.starts_with(prefix));
+    }
 
     if target_nodes.is_empty() {
         return emit_nodes(
@@ -312,6 +318,7 @@ pub fn run_callees(
     no_tests: bool,
     min_confidence: Option<i64>,
     show_resolution: bool,
+    in_path: Option<&str>,
 ) -> Result<(), Box<dyn Error>> {
     let conn = open_db(workspace)?;
 
@@ -325,6 +332,11 @@ pub fn run_callees(
         }
     }
     retain_non_tests(&mut target_nodes, no_tests);
+
+    // Filter by path prefix if --in was specified
+    if let Some(prefix) = in_path {
+        target_nodes.retain(|node| node.file_path.starts_with(prefix));
+    }
 
     if target_nodes.is_empty() {
         return emit_nodes(

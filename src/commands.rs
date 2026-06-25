@@ -144,10 +144,31 @@ mod tests {
         // Verify new query commands query the SQLite database successfully and print expected output formats
         run_search(&temp_workspace, "helper", false, false).unwrap();
         run_search(&temp_workspace, "helper", true, false).unwrap();
-        run_callers(&temp_workspace, "helper", false, false, None, false).unwrap();
-        run_callers(&temp_workspace, "helper", true, false, None, false).unwrap();
-        run_callees(&temp_workspace, "helper", false, false, None, false).unwrap();
-        run_callees(&temp_workspace, "helper", true, false, None, false).unwrap();
+        run_callers(&temp_workspace, "helper", false, false, None, false, None).unwrap();
+        run_callers(&temp_workspace, "helper", true, false, None, false, None).unwrap();
+        run_callees(&temp_workspace, "helper", false, false, None, false, None).unwrap();
+        run_callees(&temp_workspace, "helper", true, false, None, false, None).unwrap();
+        // Test --in path filter
+        run_callers(
+            &temp_workspace,
+            "helper",
+            false,
+            false,
+            None,
+            false,
+            Some("src"),
+        )
+        .unwrap();
+        run_callees(
+            &temp_workspace,
+            "helper",
+            false,
+            false,
+            None,
+            false,
+            Some("src"),
+        )
+        .unwrap();
 
         // Test run_node with file (symbols_only = false)
         run_node(
