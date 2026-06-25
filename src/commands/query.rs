@@ -305,6 +305,52 @@ pub fn run_callers(
     emit_nodes(&callers, json, "No callers found.", show_resolution)
 }
 
+pub fn run_callees(
+    workspace: &Path,
+    symbol: &str,
+    json: bool,
+    no_tests: bool,
+    min_confidence: Option<i64>,
+    show_resolution: bool,
+) -> Result<(), Box<dyn Error>> {
+    let conn = open_db(workspace)?;
+
+    // Find nodes matching the symbol name or symbol ID
+    let mut target_nodes = db::query_nodes(&conn, Some(symbol), None, None).unwrap_or_default();
+
+    // If empty, try to find by qualified name or ID
+    if target_nodes.is_empty() {
+        if let Ok(res) = query_nodes_by_id_or_qual(&conn, symbol) {
+            target_nodes = res;
+        }
+    }
+    retain_non_tests(&mut target_nodes, no_tests);
+
+    if target_nodes.is_empty() {
+        return emit_nodes(
+            &[],
+            json,
+            &format!("Symbol '{}' not found in database.", symbol),
+            show_resolution,
+        );
+    }
+
+    let mut callees = Vec::new();
+    for node in target_nodes {
+        if let Ok(node_callees) = db::find_callees(&conn, &node.id, None) {
+            callees.extend(node_callees);
+        }
+    }
+
+    if let Some(min) = min_confidence {
+        callees.retain(|c| c.confidence.unwrap_or(0) >= min);
+    }
+
+    process_related_nodes(&mut callees, no_tests);
+
+    emit_nodes(&callees, json, "No callees found.", show_resolution)
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn run_node(
     workspace: &Path,

@@ -8,7 +8,7 @@ mod query;
 mod status;
 
 pub use index::run_init;
-pub use query::{run_callers, run_explore, run_howto, run_node, run_search};
+pub use query::{run_callees, run_callers, run_explore, run_howto, run_node, run_search};
 pub use status::{run_files, run_status};
 
 #[cfg(test)]
@@ -146,6 +146,8 @@ mod tests {
         run_search(&temp_workspace, "helper", true, false).unwrap();
         run_callers(&temp_workspace, "helper", false, false, None, false).unwrap();
         run_callers(&temp_workspace, "helper", true, false, None, false).unwrap();
+        run_callees(&temp_workspace, "helper", false, false, None, false).unwrap();
+        run_callees(&temp_workspace, "helper", true, false, None, false).unwrap();
 
         // Test run_node with file (symbols_only = false)
         run_node(

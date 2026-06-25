@@ -60,6 +60,17 @@ enum Commands {
         #[arg(long = "show-resolution")]
         show_resolution: bool,
     },
+    /// Find callees of a given symbol
+    Callees {
+        /// The name or ID of the symbol to query
+        symbol: String,
+        /// Minimum confidence level to include in callees results (e.g. 80)
+        #[arg(long = "min-confidence")]
+        min_confidence: Option<i64>,
+        /// Display resolution kind and confidence metrics alongside symbols
+        #[arg(long = "show-resolution")]
+        show_resolution: bool,
+    },
     /// Inspect details of a file or a symbol
     Node {
         /// The relative path of the file to inspect
@@ -149,6 +160,20 @@ fn main() -> Result<(), Box<dyn Error>> {
             show_resolution,
         } => {
             commands::run_callers(
+                &current_dir,
+                &symbol,
+                json,
+                no_tests,
+                min_confidence,
+                show_resolution,
+            )?;
+        }
+        Commands::Callees {
+            symbol,
+            min_confidence,
+            show_resolution,
+        } => {
+            commands::run_callees(
                 &current_dir,
                 &symbol,
                 json,
