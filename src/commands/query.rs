@@ -234,6 +234,7 @@ pub fn run_search(
     query: &str,
     json: bool,
     no_tests: bool,
+    limit: usize,
 ) -> Result<(), Box<dyn Error>> {
     let conn = open_db(workspace)?;
 
@@ -256,7 +257,35 @@ pub fn run_search(
     }
 
     retain_non_tests(&mut nodes, no_tests);
-    emit_nodes(&nodes, json, "No matching nodes found.", false)
+
+    // Rank by relevance to query
+    let query_lower = query.to_lowercase();
+    nodes.sort_by_key(|n| {
+        let name_lower = n.name.to_lowercase();
+        let rank = if name_lower == query_lower {
+            0
+        } else if name_lower.starts_with(&query_lower) {
+            1
+        } else if name_lower.contains(&query_lower) {
+            2
+        } else {
+            3
+        };
+        (rank, n.name.len(), n.name.clone())
+    });
+
+    let total = nodes.len();
+    if total > limit {
+        nodes.truncate(limit);
+    }
+
+    emit_nodes(&nodes, json, "No matching nodes found.", false)?;
+
+    if !json && total > limit {
+        println!("... and {} more (use --limit to see more)", total - limit);
+    }
+
+    Ok(())
 }
 
 pub fn run_callers(

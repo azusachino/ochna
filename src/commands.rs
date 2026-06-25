@@ -142,8 +142,8 @@ mod tests {
         run_files(&temp_workspace, true).unwrap();
 
         // Verify new query commands query the SQLite database successfully and print expected output formats
-        run_search(&temp_workspace, "helper", false, false).unwrap();
-        run_search(&temp_workspace, "helper", true, false).unwrap();
+        run_search(&temp_workspace, "helper", false, false, 30).unwrap();
+        run_search(&temp_workspace, "helper", true, false, 30).unwrap();
         run_callers(&temp_workspace, "helper", false, false, None, false, None).unwrap();
         run_callers(&temp_workspace, "helper", true, false, None, false, None).unwrap();
         run_callees(&temp_workspace, "helper", false, false, None, false, None).unwrap();

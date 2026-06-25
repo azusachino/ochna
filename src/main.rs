@@ -48,6 +48,9 @@ enum Commands {
     Search {
         /// The search query
         query: String,
+        /// Maximum number of results to display
+        #[arg(long = "limit", default_value_t = 30)]
+        limit: usize,
     },
     /// Find callers of a given symbol
     Callers {
@@ -157,8 +160,8 @@ fn main() -> Result<(), Box<dyn Error>> {
         Commands::Files => {
             commands::run_files(&current_dir, json)?;
         }
-        Commands::Search { query } => {
-            commands::run_search(&current_dir, &query, json, no_tests)?;
+        Commands::Search { query, limit } => {
+            commands::run_search(&current_dir, &query, json, no_tests, limit)?;
         }
         Commands::Callers {
             symbol,
