@@ -17,7 +17,7 @@ A structural code-graph CLI: parses Rust/Go/Java with Tree-sitter, indexes symbo
 
 - Exercise the CLI as an **installed global** (`make install`, then `ochna <cmd>`) — not via the target-dir binary path.
 - **ochna resolves its `.ochna/ochna.db` from the current working directory.** To investigate a project (e.g. a `clones/` submodule), `cd` into it once, then run `ochna` bare. To target a workspace without `cd`-ing, pass the global `--workspace <PATH>` (`-C <PATH>`) flag — e.g. `ochna -C clones/tokio search Runtime`.
-- Investigate flow: `ochna search <name>` → `ochna callers <name>` (who calls it) / `ochna callees <name>` (what it calls, for top-down walks) → `ochna node --symbol <name> --include-code` (or `ochna explore <query>` for the combined view). Prefer this over recursive `rg`/file reads for symbol lookups.
+- Investigate flow: `ochna search <name>` → `ochna callers <name>` (who calls it) / `ochna callees <name>` (what it calls, for top-down walks) → `ochna node --symbol <name> --include-code` (or `ochna explore <query>` for the combined view). Reach for this for symbol and call-graph lookups; pair it with `rg` (free-text/regex) and `ast-grep` (structural patterns) — the tools complement each other rather than compete.
 - For symbols whose name collides across packages (e.g. `worker`, `Run`), scope resolution with `--in <path-prefix>` — e.g. `ochna callees worker --in pkg/controller/podautoscaler`. `search` is ranked (exact → prefix → substring) and capped by `--limit` (default 30); output shows the receiver-qualified name (`Type::method`).
 - Run command sequences plainly — no decorated echo banners around invocations.
 

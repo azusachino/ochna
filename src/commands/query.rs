@@ -12,12 +12,12 @@ use std::path::Path;
 const HOWTO_TEXT: &str = r#"ochna usage flow
 
 1. Run `ochna status` first. If the index is stale, run `ochna sync` (or `ochna init` to build it).
-2. Search for an entry point with `ochna search <name>`.
-3. Trace incoming references with `ochna callers <name>`.
+2. Search for an entry point with `ochna search <name>` (results are ranked best-first and capped by `--limit`, default 30).
+3. Trace incoming references with `ochna callers <name>`, or outgoing calls with `ochna callees <name>` for top-down walks.
 4. Inspect a definition with `ochna node --symbol <name> --include-code`.
 5. Use `ochna explore <query>` when you want search results, snippets, and graph context together.
 
-Use ochna BEFORE recursive grep/read: prefer `search`/`callers`/`node` over `rg` for symbol lookups.
+ochna complements `rg`/`ast-grep`: use it for symbol and call-graph lookups (definitions, callers/callees) instead of reconstructing edges with `rg`; use `rg` for free-text/regex and `ast-grep` for structural AST patterns.
 
 Inspecting nodes
 
@@ -29,11 +29,12 @@ Call-edge confidence
 
 - Add `--show-resolution` to any query to print each edge's resolution kind and confidence.
 - Add `--min-confidence <N>` to `callers` to drop weak edges. Cascade: exact 100, receiver_type 90, package/namespace 80, same_file 60, name_only 30. Use `--min-confidence 80` to cut noise on common method names.
+- Disambiguate names that collide across packages with `--in <path-prefix>` on `callers`/`callees`, e.g. `ochna callees worker --in pkg/controller/podautoscaler`. Query output shows the receiver-qualified name (`Type::method`) when available.
 
 Operational facts
 
 - The database is resolved from the current working directory at `.ochna/ochna.db`.
-- There is no `--workspace` flag; `cd` into the project or submodule before querying.
+- Target another workspace from any cwd with the global `--workspace <PATH>` (`-C <PATH>`) flag, e.g. `ochna -C clones/tokio search Runtime`.
 - Add global `--json` for machine-readable stdout; add global `--no-tests` to hide symbols classified from test paths.
 - `init`/`sync` skip library/generated dirs (target, node_modules, .venv, vendor, build, dist) by default; pass `--include-library` to index them.
 - Diagnostics and progress go to stderr; JSON stdout is kept parseable.
@@ -41,13 +42,13 @@ Operational facts
 
 #[derive(Serialize)]
 struct HowtoDescriptor<'a> {
-    flow: [&'a str; 5],
+    flow: [&'a str; 6],
     rule: &'a str,
     commands: HowtoCommands<'a>,
     node_modes: [&'a str; 3],
     flags: HowtoFlags<'a>,
     confidence_cascade: [&'a str; 5],
-    globals: [&'a str; 2],
+    globals: [&'a str; 3],
     notes: [&'a str; 3],
 }
 
@@ -56,6 +57,7 @@ struct HowtoCommands<'a> {
     status: &'a str,
     search: &'a str,
     callers: &'a str,
+    callees: &'a str,
     node: &'a str,
     explore: &'a str,
     files: &'a str,
@@ -67,20 +69,25 @@ struct HowtoCommands<'a> {
 struct HowtoFlags<'a> {
     show_resolution: &'a str,
     min_confidence: &'a str,
+    #[serde(rename = "in")]
+    in_scope: &'a str,
+    limit: &'a str,
     include_library: &'a str,
     no_tests: &'a str,
+    workspace: &'a str,
     json: &'a str,
 }
 
 pub fn run_howto(json: bool) -> Result<(), Box<dyn Error>> {
     if json {
         let descriptor = HowtoDescriptor {
-            flow: ["status", "search", "callers", "node", "explore"],
-            rule: "use ochna before recursive grep/read; prefer search/callers/node over rg for symbol lookups",
+            flow: ["status", "search", "callers", "callees", "node", "explore"],
+            rule: "ochna complements rg/ast-grep: use it for symbol and call-graph lookups; use rg for free-text/regex and ast-grep for structural AST patterns",
             commands: HowtoCommands {
                 status: "check whether the local index exists, matches the binary schema, and is fresh enough to trust",
-                search: "fuzzy and full-text symbol lookup",
-                callers: "reverse call-edge lookup for a symbol",
+                search: "fuzzy and full-text symbol lookup, ranked best-first and capped by --limit",
+                callers: "reverse call-edge lookup for a symbol (who calls it)",
+                callees: "forward call-edge lookup for a symbol (what it calls); use for top-down walks",
                 node: "inspect a file, symbol metadata, and optionally source code",
                 explore: "combined search, snippets, callers, and callees view",
                 files: "list indexed files and per-file symbol counts",
@@ -95,8 +102,11 @@ pub fn run_howto(json: bool) -> Result<(), Box<dyn Error>> {
             flags: HowtoFlags {
                 show_resolution: "print each edge's resolution kind and confidence on any query",
                 min_confidence: "drop weak callers edges below <N> (e.g. 80 to keep only typed/qualified matches)",
+                in_scope: "scope callers/callees target resolution to symbols under a file path prefix (disambiguates name collisions)",
+                limit: "cap search results (default 30); results are ranked exact > prefix > substring > body match",
                 include_library: "index library/generated dirs (target, node_modules, .venv, vendor, build, dist) on init/sync",
                 no_tests: "hide symbols classified from test paths",
+                workspace: "target a workspace's .ochna/ochna.db from any cwd (--workspace <PATH> / -C <PATH>)",
                 json: "emit machine-readable JSON on stdout",
             },
             confidence_cascade: [
@@ -106,10 +116,10 @@ pub fn run_howto(json: bool) -> Result<(), Box<dyn Error>> {
                 "same_file=60",
                 "name_only=30",
             ],
-            globals: ["--json", "--no-tests"],
+            globals: ["--json", "--no-tests", "--workspace"],
             notes: [
-                "the database resolves from the current working directory (.ochna/ochna.db)",
-                "there is no `--workspace` flag; cd into the project or submodule before querying",
+                "the database resolves from the current working directory (.ochna/ochna.db), or from --workspace <PATH> / -C <PATH>",
+                "query output shows the receiver-qualified name (Type::method) when available",
                 "diagnostics and progress go to stderr; JSON stdout stays parseable",
             ],
         };

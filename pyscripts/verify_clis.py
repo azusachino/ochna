@@ -77,11 +77,23 @@ def main() -> int:
         howto = run([ochna, "howto"], tmp).stdout
         assert "ochna usage flow" in howto
         howto_json = assert_json(run([ochna, "howto", "--json"], tmp).stdout)
-        assert howto_json["flow"] == ["status", "search", "callers", "node", "explore"]
+        assert howto_json["flow"] == [
+            "status",
+            "search",
+            "callers",
+            "callees",
+            "node",
+            "explore",
+        ]
         assert "status" in howto_json["commands"]
+        assert "callees" in howto_json["commands"]
         assert howto_json["flags"]["min_confidence"]
         assert howto_json["flags"]["show_resolution"]
         assert howto_json["flags"]["include_library"]
+        assert howto_json["flags"]["in"]
+        assert howto_json["flags"]["limit"]
+        assert howto_json["flags"]["workspace"]
+        assert "--workspace" in howto_json["globals"]
         assert any("symbols-only" in mode for mode in howto_json["node_modes"])
         assert howto_json["confidence_cascade"][0] == "exact=100"
 
@@ -121,6 +133,18 @@ def main() -> int:
         res_text = run([ochna, "callers", "helper", "--show-resolution"], tmp).stdout
         assert "resolution:" in res_text and "confidence:" in res_text
 
+        # --- callees: forward edges (what a symbol calls); --in scopes by path ---
+        callees = assert_json(run([ochna, "--json", "callees", "caller_one"], tmp).stdout)
+        assert "helper" in {n["name"] for n in callees}
+        scoped = assert_json(
+            run([ochna, "--json", "callees", "caller_one", "--in", "src"], tmp).stdout
+        )
+        assert "helper" in {n["name"] for n in scoped}
+        unscoped_out = assert_json(
+            run([ochna, "--json", "callees", "caller_one", "--in", "nonexistent"], tmp).stdout
+        )
+        assert unscoped_out == []
+
         # --- node: definition source, file symbol listing, and line slicing ---
         node_code = run([ochna, "node", "--symbol", "helper", "--include-code"], tmp).stdout
         assert "pub fn helper() {}" in node_code
@@ -137,6 +161,14 @@ def main() -> int:
         # --- explore: combined view includes callers ---
         explore = run([ochna, "explore", "helper"], tmp).stdout
         assert "caller_one" in explore and "Callers:" in explore
+
+        # --- --workspace/-C resolves the db from a different cwd ---
+        other = tmp / "elsewhere"
+        other.mkdir()
+        ws_search = assert_json(
+            run([ochna, "--json", "-C", str(tmp), "search", "helper"], other).stdout
+        )
+        assert "helper" in {n["name"] for n in ws_search}
 
         # --- report.py analytics stays runnable against the live schema ---
         # (its hotspots query joins edges.target_nid; guards against the schema
