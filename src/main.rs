@@ -4,6 +4,7 @@ pub mod parser;
 
 use clap::{Parser, Subcommand};
 use std::error::Error;
+use std::path::PathBuf;
 
 #[derive(Parser, Debug)]
 #[command(name = "ochna")]
@@ -17,6 +18,10 @@ struct Cli {
     /// Exclude symbols classified as test code from query results
     #[arg(long = "no-tests", global = true)]
     no_tests: bool,
+    /// Target the workspace at this path instead of the current directory,
+    /// so its `.ochna/ochna.db` is reachable from any cwd
+    #[arg(long = "workspace", short = 'C', global = true)]
+    workspace: Option<PathBuf>,
 }
 
 #[derive(Subcommand, Debug)]
@@ -108,7 +113,10 @@ fn main() -> Result<(), Box<dyn Error>> {
         .without_time()
         .init();
 
-    let current_dir = std::env::current_dir()?;
+    let current_dir = match cli.workspace {
+        Some(path) => path,
+        None => std::env::current_dir()?,
+    };
     let json = cli.json;
     let no_tests = cli.no_tests;
 
@@ -182,4 +190,25 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn workspace_flag_parses_globally_after_subcommand() {
+        // `--workspace`/`-C` is global, so it must parse whether placed before or
+        // after the subcommand; the value overrides cwd-based DB resolution.
+        let long = Cli::try_parse_from(["ochna", "search", "Runtime", "--workspace", "/tmp/ws"])
+            .expect("long form should parse after subcommand");
+        assert_eq!(long.workspace, Some(PathBuf::from("/tmp/ws")));
+
+        let short = Cli::try_parse_from(["ochna", "-C", "/tmp/ws", "status"])
+            .expect("short form should parse before subcommand");
+        assert_eq!(short.workspace, Some(PathBuf::from("/tmp/ws")));
+
+        let absent = Cli::try_parse_from(["ochna", "status"]).expect("flag is optional");
+        assert_eq!(absent.workspace, None);
+    }
 }
