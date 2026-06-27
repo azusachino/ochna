@@ -4,6 +4,7 @@ pub mod parser;
 
 use clap::{Parser, Subcommand};
 use std::error::Error;
+use std::path::PathBuf;
 
 #[derive(Parser, Debug)]
 #[command(name = "ochna")]
@@ -17,6 +18,10 @@ struct Cli {
     /// Exclude symbols classified as test code from query results
     #[arg(long = "no-tests", global = true)]
     no_tests: bool,
+    /// Target the workspace at this path instead of the current directory,
+    /// so its `.ochna/ochna.db` is reachable from any cwd
+    #[arg(long = "workspace", short = 'C', global = true)]
+    workspace: Option<PathBuf>,
 }
 
 #[derive(Subcommand, Debug)]
@@ -43,6 +48,9 @@ enum Commands {
     Search {
         /// The search query
         query: String,
+        /// Maximum number of results to display
+        #[arg(long = "limit", default_value_t = 30)]
+        limit: usize,
     },
     /// Find callers of a given symbol
     Callers {
@@ -54,6 +62,23 @@ enum Commands {
         /// Display resolution kind and confidence metrics alongside symbols
         #[arg(long = "show-resolution")]
         show_resolution: bool,
+        /// Only resolve target symbols whose file path starts with this prefix
+        #[arg(long = "in")]
+        in_path: Option<String>,
+    },
+    /// Find callees of a given symbol
+    Callees {
+        /// The name or ID of the symbol to query
+        symbol: String,
+        /// Minimum confidence level to include in callees results (e.g. 80)
+        #[arg(long = "min-confidence")]
+        min_confidence: Option<i64>,
+        /// Display resolution kind and confidence metrics alongside symbols
+        #[arg(long = "show-resolution")]
+        show_resolution: bool,
+        /// Only resolve target symbols whose file path starts with this prefix
+        #[arg(long = "in")]
+        in_path: Option<String>,
     },
     /// Inspect details of a file or a symbol
     Node {
@@ -108,7 +133,10 @@ fn main() -> Result<(), Box<dyn Error>> {
         .without_time()
         .init();
 
-    let current_dir = std::env::current_dir()?;
+    let current_dir = match cli.workspace {
+        Some(path) => path,
+        None => std::env::current_dir()?,
+    };
     let json = cli.json;
     let no_tests = cli.no_tests;
 
@@ -132,13 +160,14 @@ fn main() -> Result<(), Box<dyn Error>> {
         Commands::Files => {
             commands::run_files(&current_dir, json)?;
         }
-        Commands::Search { query } => {
-            commands::run_search(&current_dir, &query, json, no_tests)?;
+        Commands::Search { query, limit } => {
+            commands::run_search(&current_dir, &query, json, no_tests, limit)?;
         }
         Commands::Callers {
             symbol,
             min_confidence,
             show_resolution,
+            in_path,
         } => {
             commands::run_callers(
                 &current_dir,
@@ -147,6 +176,23 @@ fn main() -> Result<(), Box<dyn Error>> {
                 no_tests,
                 min_confidence,
                 show_resolution,
+                in_path.as_deref(),
+            )?;
+        }
+        Commands::Callees {
+            symbol,
+            min_confidence,
+            show_resolution,
+            in_path,
+        } => {
+            commands::run_callees(
+                &current_dir,
+                &symbol,
+                json,
+                no_tests,
+                min_confidence,
+                show_resolution,
+                in_path.as_deref(),
             )?;
         }
         Commands::Node {
@@ -182,4 +228,25 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn workspace_flag_parses_globally_after_subcommand() {
+        // `--workspace`/`-C` is global, so it must parse whether placed before or
+        // after the subcommand; the value overrides cwd-based DB resolution.
+        let long = Cli::try_parse_from(["ochna", "search", "Runtime", "--workspace", "/tmp/ws"])
+            .expect("long form should parse after subcommand");
+        assert_eq!(long.workspace, Some(PathBuf::from("/tmp/ws")));
+
+        let short = Cli::try_parse_from(["ochna", "-C", "/tmp/ws", "status"])
+            .expect("short form should parse before subcommand");
+        assert_eq!(short.workspace, Some(PathBuf::from("/tmp/ws")));
+
+        let absent = Cli::try_parse_from(["ochna", "status"]).expect("flag is optional");
+        assert_eq!(absent.workspace, None);
+    }
 }

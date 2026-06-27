@@ -1,13 +1,17 @@
 ---
 name: ochna
-description: Use the ochna CLI to index, search, explore, and trace code call-graphs structurally without expensive recursive grep/read commands.
+description: Use the ochna CLI to index, search, explore, and trace code call-graphs structurally — a complement to text tools like rg and ast-grep for symbol and call-edge questions.
 ---
 
 # ochna CLI Playbook
 
 `ochna` is a local codebase intelligence CLI. It parses Rust, Go, Java, C, C++, and Zig files using Tree-sitter AST, indexes them in SQLite, and provides direct query commands. Call edges are resolved **across files**, so `callers`/`callees` trace the whole-project call graph; calls to symbols outside the index are recorded as unresolved references rather than dropped.
 
-Use `ochna` BEFORE resorting to standard tools like `rg` or `view_file`.
+`ochna`, `rg`, and `ast-grep` are complementary — reach for the one that fits the
+question: `ochna` for symbol and call-graph queries (definitions, callers/callees,
+cross-file edges), `rg` for free-text/regex occurrences, and `ast-grep` for
+structural AST patterns or rewrites. The win is using `ochna` for the graph
+instead of reconstructing call edges by hand with `rg`, not avoiding `rg`.
 
 **Confidence-aware edges**: call edges carry a resolution kind and a derived
 confidence score from a staged cascade — `exact` (100), `receiver_type` (90),
@@ -36,12 +40,22 @@ points as graph nodes.
 Run `ochna howto` (or `ochna howto --json` for a capability descriptor) for the
 full, always-current command and flag reference — it is the single source of
 truth and stays in sync with the installed binary, so this playbook does not
-re-list every command. The flow is `status` → `search` → `callers` → `node`,
-with `explore` for a combined view. Judgment notes specific to this playbook:
+re-list every command. The flow is `status` → `search` → `callers`/`callees` →
+`node`, with `explore` for a combined view. Judgment notes specific to this
+playbook:
 
 - `--show-resolution` / `--min-confidence <N>` on `callers` apply the confidence
   cascade above; use `--min-confidence 80` to cut noise on common Go/Java method
   names.
+- `callees <symbol>` walks the call graph forward (what a symbol calls) — use it
+  for top-down dives, the mirror of `callers`. `search` is ranked best-first and
+  capped by `--limit` (default 30), and output shows the receiver-qualified name
+  (`Type::method`).
+- `--in <path-prefix>` on `callers`/`callees` scopes target resolution to symbols
+  under a path, disambiguating bare names that collide across packages (e.g.
+  `worker`, `Run`); pairs well with `--min-confidence` for noise reduction.
+- Global `--workspace <PATH>` (`-C <PATH>`) targets a workspace's
+  `.ochna/ochna.db` from any cwd — no need to `cd` into the project first.
 - `ochna node --file <path> --symbols-only` and `--offset/--limit` replace
   `view_file` for structural reads; `--include-code [--line <n>]` returns a
   symbol's source and disambiguates overloads.
@@ -68,7 +82,7 @@ For custom queries or advanced analytics directly from the SQLite database:
 
 ## Workflow Integration Rules
 
-1.  **Graph First**: For any task, run `ochna explore <keyword>` first to map out the relevant implementation files.
-2.  **No Blind Grepping**: Do not run recursive greps (`rg`) for symbol lookups. Run `ochna search <name>` or `ochna callers <name>` instead.
-3.  **Read Replacements**: Use `ochna node --file <path>` instead of `view_file` to read source files; it returns line numbers and attaches dependents.
+1.  **Graph First**: For symbol and relationship questions, run `ochna explore <keyword>` / `ochna search` first to map the call graph — it answers "who calls / what does this call" that `rg` cannot cheaply.
+2.  **Right Tool per Question**: Use `ochna search`/`callers`/`callees` for symbol and call-graph lookups; use `rg` for free-text or regex occurrences (e.g. where a string or config key appears) and `ast-grep` for structural AST patterns or rewrites. They complement each other.
+3.  **Read Replacements**: For structural reads, `ochna node --file <path>` returns line numbers and attaches dependents — handy when you want symbols + graph context rather than raw text.
 4.  **Large PR Archaeology**: For Linux/Kubernetes-style corpora, do not assume local merge parents exist. First verify the index with `ochna status --json`, use `gh api` for PR metadata and changed files, then use `ochna node --file ... --symbols-only --json` and `ochna node --symbol ... --include-code --json` for the changed symbols. Treat common Go method callees such as `GetList`, `Run`, `Add`, and `Stop` as noisy unless they are anchored to the changed file or exact production symbol.

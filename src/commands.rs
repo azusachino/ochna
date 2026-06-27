@@ -8,7 +8,7 @@ mod query;
 mod status;
 
 pub use index::run_init;
-pub use query::{run_callers, run_explore, run_howto, run_node, run_search};
+pub use query::{run_callees, run_callers, run_explore, run_howto, run_node, run_search};
 pub use status::{run_files, run_status};
 
 #[cfg(test)]
@@ -142,10 +142,33 @@ mod tests {
         run_files(&temp_workspace, true).unwrap();
 
         // Verify new query commands query the SQLite database successfully and print expected output formats
-        run_search(&temp_workspace, "helper", false, false).unwrap();
-        run_search(&temp_workspace, "helper", true, false).unwrap();
-        run_callers(&temp_workspace, "helper", false, false, None, false).unwrap();
-        run_callers(&temp_workspace, "helper", true, false, None, false).unwrap();
+        run_search(&temp_workspace, "helper", false, false, 30).unwrap();
+        run_search(&temp_workspace, "helper", true, false, 30).unwrap();
+        run_callers(&temp_workspace, "helper", false, false, None, false, None).unwrap();
+        run_callers(&temp_workspace, "helper", true, false, None, false, None).unwrap();
+        run_callees(&temp_workspace, "helper", false, false, None, false, None).unwrap();
+        run_callees(&temp_workspace, "helper", true, false, None, false, None).unwrap();
+        // Test --in path filter
+        run_callers(
+            &temp_workspace,
+            "helper",
+            false,
+            false,
+            None,
+            false,
+            Some("src"),
+        )
+        .unwrap();
+        run_callees(
+            &temp_workspace,
+            "helper",
+            false,
+            false,
+            None,
+            false,
+            Some("src"),
+        )
+        .unwrap();
 
         // Test run_node with file (symbols_only = false)
         run_node(
