@@ -57,8 +57,8 @@ def main() -> int:
         run(["git", "config", "user.email", "ochna@example.invalid"], tmp)
         run(["git", "config", "user.name", "Ochna Verify"], tmp)
 
-        # Fixture: `helper` with two in-file callers (resolved call edges) plus a
-        # test-path symbol so --no-tests has something to drop.
+        # Fixture: `helper` with two in-file callers (resolved call edges) plus
+        # a test-path caller for `tests-for` and --no-tests coverage.
         (tmp / "src").mkdir()
         (tmp / "tests").mkdir()
         (tmp / "src" / "lib.rs").write_text(
@@ -68,7 +68,7 @@ def main() -> int:
             encoding="utf-8",
         )
         (tmp / "tests" / "extra.rs").write_text(
-            "pub fn helper_in_tests() {}\n", encoding="utf-8"
+            "pub fn helper_in_tests() {\n    helper();\n}\n", encoding="utf-8"
         )
         run(["git", "add", "-A"], tmp)
         run(["git", "commit", "-m", "baseline"], tmp)
@@ -168,6 +168,28 @@ def main() -> int:
         nt_names = {n["name"] for n in search_nt}
         assert "helper" in nt_names
         assert "helper_in_tests" not in nt_names
+
+        # --- tests-for: direct AST evidence, stable envelope, and explicit
+        # --no-tests suppression (not a claim that no tests exist) ---
+        tests_for = assert_json(run([ochna, "--json", "tests-for", "helper"], tmp).stdout)
+        assert tests_for["contract_version"] == "0.3"
+        assert tests_for["command"] == "tests-for"
+        assert tests_for["ok"] is True
+        assert tests_for["data"]["target"]["id"] == "src/lib.rs::helper"
+        assert len(tests_for["data"]["tests"]) == 1
+        direct = tests_for["data"]["tests"][0]
+        assert direct["test"]["id"] == "tests/extra.rs::helper_in_tests"
+        assert direct["evidence"] == "direct_call"
+        assert direct["confidence"] == direct["path"][0]["confidence"]
+        assert direct["path"][0]["relationship"] == "calls"
+        assert direct["path"][0]["source"]["id"] == direct["test"]["id"]
+        assert direct["path"][0]["target"]["id"] == "src/lib.rs::helper"
+        tests_for_no_tests = assert_json(
+            run([ochna, "--json", "--no-tests", "tests-for", "helper"], tmp).stdout
+        )
+        assert tests_for_no_tests["ok"] is True
+        assert tests_for_no_tests["data"]["target"]["id"] == "src/lib.rs::helper"
+        assert tests_for_no_tests["data"]["tests"] == []
 
         # --- callers: returns known callers w/ confidence; --min-confidence filters ---
         callers = assert_json(run([ochna, "--json", "callers", "helper"], tmp).stdout)

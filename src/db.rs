@@ -7,7 +7,7 @@ mod raw_calls;
 mod refs;
 mod schema;
 
-pub use edges::{delete_edges_for_source_id, upsert_edge};
+pub use edges::{delete_edges_for_source_id, find_edges_between, upsert_edge};
 pub use files::{
     get_file_metadata, get_project_metadata, upsert_file_metadata, upsert_project_metadata,
 };
@@ -57,6 +57,13 @@ pub struct Edge {
     pub kind: String,
     #[serde(default)]
     pub resolution_kind: i64,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct EdgeRecord {
+    pub kind: String,
+    pub resolution_kind: String,
+    pub confidence: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

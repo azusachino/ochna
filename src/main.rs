@@ -17,6 +17,17 @@ fn parse_unresolved_limit(value: &str) -> Result<usize, String> {
     }
 }
 
+fn parse_tests_for_limit(value: &str) -> Result<usize, String> {
+    let limit = value
+        .parse::<usize>()
+        .map_err(|_| "limit must be a positive integer".to_string())?;
+    if (1..=100).contains(&limit) {
+        Ok(limit)
+    } else {
+        Err("limit must be between 1 and 100".to_string())
+    }
+}
+
 #[derive(Parser, Debug)]
 #[command(name = "ochna")]
 #[command(author, version, about = "Code graph indexing and analysis tool", long_about = None)]
@@ -62,6 +73,17 @@ enum Commands {
         in_path: Option<String>,
         /// Maximum references to return (default 50, maximum 200)
         #[arg(long, default_value_t = 50, value_parser = parse_unresolved_limit)]
+        limit: usize,
+    },
+    /// Find test relationships for a production symbol; evidence is structural, not coverage proof
+    TestsFor {
+        /// The name, qualified name, or ID of the production symbol to query
+        symbol: String,
+        /// Only resolve target symbols whose file path starts with this prefix
+        #[arg(long = "in")]
+        in_path: Option<String>,
+        /// Maximum test relationships to return (default 30, maximum 100)
+        #[arg(long, default_value_t = 30, value_parser = parse_tests_for_limit)]
         limit: usize,
     },
     /// List indexed files with metadata
@@ -185,6 +207,20 @@ fn main() -> Result<(), Box<dyn Error>> {
         Commands::Unresolved { in_path, limit } => {
             commands::run_unresolved(&current_dir, in_path.as_deref(), limit, json)?;
         }
+        Commands::TestsFor {
+            symbol,
+            in_path,
+            limit,
+        } => {
+            commands::run_tests_for(
+                &current_dir,
+                &symbol,
+                in_path.as_deref(),
+                limit,
+                json,
+                no_tests,
+            )?;
+        }
         Commands::Files => {
             commands::run_files(&current_dir, json)?;
         }
@@ -276,5 +312,32 @@ mod tests {
 
         let absent = Cli::try_parse_from(["ochna", "status"]).expect("flag is optional");
         assert_eq!(absent.workspace, None);
+    }
+
+    #[test]
+    fn tests_for_parses_scope_and_enforces_its_limit() {
+        let cli = Cli::try_parse_from([
+            "ochna",
+            "tests-for",
+            "render",
+            "--in",
+            "src",
+            "--limit",
+            "100",
+        ])
+        .expect("valid tests-for arguments should parse");
+        match cli.command {
+            Commands::TestsFor {
+                symbol,
+                in_path,
+                limit,
+            } => {
+                assert_eq!(symbol, "render");
+                assert_eq!(in_path.as_deref(), Some("src"));
+                assert_eq!(limit, 100);
+            }
+            _ => panic!("expected tests-for command"),
+        }
+        assert!(Cli::try_parse_from(["ochna", "tests-for", "render", "--limit", "101"]).is_err());
     }
 }

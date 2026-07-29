@@ -158,6 +158,226 @@ fn query_nodes_by_id_or_qual(conn: &Connection, symbol: &str) -> rusqlite::Resul
     Ok(nodes)
 }
 
+#[derive(Clone, Serialize)]
+struct RelationshipPath {
+    relationship: &'static str,
+    source: db::Node,
+    target: db::Node,
+    resolution_kind: String,
+    confidence: i64,
+}
+
+#[derive(Serialize)]
+struct TestForItem {
+    test: db::Node,
+    path: Vec<RelationshipPath>,
+    confidence: i64,
+    evidence: &'static str,
+}
+
+struct TargetResolution {
+    target: Option<db::Node>,
+    warnings: Vec<serde_json::Value>,
+}
+
+fn resolve_one_node(
+    conn: &Connection,
+    symbol: &str,
+    in_path: Option<&str>,
+) -> rusqlite::Result<TargetResolution> {
+    let mut exact = query_nodes_by_id_or_qual(conn, symbol)?;
+    let mut nodes = if exact.is_empty() {
+        db::query_nodes(conn, Some(symbol), None, None)?
+    } else {
+        std::mem::take(&mut exact)
+    };
+    if let Some(prefix) = in_path {
+        nodes.retain(|node| node.file_path.starts_with(prefix));
+    }
+    nodes.sort_by(|left, right| left.id.cmp(&right.id));
+    if nodes.len() == 1 {
+        Ok(TargetResolution {
+            target: nodes.into_iter().next(),
+            warnings: Vec::new(),
+        })
+    } else if nodes.len() > 1 {
+        Ok(TargetResolution {
+            target: None,
+            warnings: vec![json!({
+                "code": "ambiguous_symbol",
+                "message": format!("symbol '{symbol}' matches {} indexed definitions; use --in or an ID/qualified name", nodes.len()),
+            })],
+        })
+    } else {
+        Ok(TargetResolution {
+            target: None,
+            warnings: Vec::new(),
+        })
+    }
+}
+
+fn edge_path(source: &db::Node, target: &db::Node, edge: &db::EdgeRecord) -> RelationshipPath {
+    RelationshipPath {
+        relationship: match edge.kind.as_str() {
+            "calls" => "calls",
+            "tests" => "tests",
+            "contains" => "contains",
+            _ => "references",
+        },
+        source: source.clone(),
+        target: target.clone(),
+        resolution_kind: edge.resolution_kind.clone(),
+        confidence: edge.confidence,
+    }
+}
+
+fn collect_tests_for(
+    conn: &Connection,
+    target: &db::Node,
+    no_tests: bool,
+) -> rusqlite::Result<Vec<TestForItem>> {
+    if no_tests {
+        return Ok(Vec::new());
+    }
+
+    let mut tests = db::query_nodes(conn, None, None, None)?;
+    tests.retain(|node| node.is_test);
+    tests.sort_by(|left, right| left.id.cmp(&right.id));
+
+    let mut siblings = db::query_nodes(conn, None, None, Some(&target.file_path))?;
+    siblings.retain(|node| !node.is_test && node.id != target.id);
+    siblings.sort_by(|left, right| left.id.cmp(&right.id));
+
+    let target_name = target.name.to_ascii_lowercase();
+    let mut items = Vec::new();
+    for test in tests {
+        let mut callees = db::find_callees(conn, &test.id, None)?;
+        callees.sort_by(|left, right| left.id.cmp(&right.id));
+
+        let direct_edges = db::find_edges_between(conn, &test.id, &target.id, Some("calls"))?;
+        if let Some(edge) = direct_edges.first() {
+            let path = edge_path(&test, target, edge);
+            items.push(TestForItem {
+                test: test.clone(),
+                confidence: path.confidence,
+                path: vec![path],
+                evidence: "direct_call",
+            });
+            continue;
+        }
+
+        if siblings
+            .iter()
+            .any(|sibling| callees.iter().any(|callee| callee.id == sibling.id))
+        {
+            items.push(TestForItem {
+                test: test.clone(),
+                confidence: 60,
+                path: vec![RelationshipPath {
+                    relationship: "references",
+                    source: test.clone(),
+                    target: target.clone(),
+                    resolution_kind: "same_module_candidate".to_string(),
+                    confidence: 60,
+                }],
+                evidence: "same_module_candidate",
+            });
+            continue;
+        }
+
+        let test_name = test
+            .qualified_name
+            .as_deref()
+            .unwrap_or(&test.name)
+            .to_ascii_lowercase();
+        if test_name.contains(&target_name) {
+            items.push(TestForItem {
+                test: test.clone(),
+                confidence: 30,
+                path: vec![RelationshipPath {
+                    relationship: "tests",
+                    source: test.clone(),
+                    target: target.clone(),
+                    resolution_kind: "name_heuristic".to_string(),
+                    confidence: 30,
+                }],
+                evidence: "name_heuristic",
+            });
+        }
+    }
+
+    items.sort_by(|left, right| {
+        right
+            .confidence
+            .cmp(&left.confidence)
+            .then_with(|| left.test.id.cmp(&right.test.id))
+            .then_with(|| left.evidence.cmp(right.evidence))
+    });
+    Ok(items)
+}
+
+pub fn run_tests_for(
+    workspace: &Path,
+    symbol: &str,
+    in_path: Option<&str>,
+    limit: usize,
+    json: bool,
+    no_tests: bool,
+) -> Result<(), Box<dyn Error>> {
+    let conn = open_db(workspace)?;
+    let resolution = resolve_one_node(&conn, symbol, in_path)?;
+    let target = resolution.target;
+    let mut tests = match &target {
+        Some(target) => collect_tests_for(&conn, target, no_tests)?,
+        None => Vec::new(),
+    };
+    let truncated = tests.len() > limit;
+    tests.truncate(limit);
+
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&json!({
+                "contract_version": "0.3",
+                "command": "tests-for",
+                "ok": target.is_some(),
+                "data": {"target": target, "tests": tests},
+                "warnings": resolution.warnings,
+                "truncated": truncated,
+                "next_action": if truncated || !target.is_some() { "narrow the query" } else { "none" },
+            }))?
+        );
+    } else {
+        println!("Tests for {symbol}:");
+        if target.is_none() {
+            if resolution.warnings.is_empty() {
+                println!("none (symbol not found)");
+            } else {
+                println!("none (symbol is ambiguous; use --in or an ID/qualified name)");
+            }
+        } else if tests.is_empty() {
+            println!("none");
+        } else {
+            for item in tests {
+                let path = item
+                    .path
+                    .iter()
+                    .map(|edge| format!("{} -> {}", edge.source.id, edge.target.id))
+                    .collect::<Vec<_>>()
+                    .join("; ");
+                println!(
+                    "- {} [{}; confidence: {}]: {}",
+                    item.test.id, item.evidence, item.confidence, path
+                );
+            }
+        }
+        if truncated {
+            println!("Warnings:\n- result limit reached; narrow the query");
+        }
+    }
+    Ok(())
+}
+
 /// Open the workspace database, returning a clear error if it has not been indexed.
 fn open_db(workspace: &Path) -> Result<Connection, Box<dyn Error>> {
     let db_path = workspace.join(".ochna").join("ochna.db");
@@ -842,6 +1062,7 @@ pub fn run_explore(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rusqlite::Connection;
 
     fn node(id: &str, is_test: bool) -> db::Node {
         db::Node {
@@ -871,5 +1092,163 @@ mod tests {
         retain_non_tests(&mut nodes, true);
         assert_eq!(nodes.len(), 1);
         assert_eq!(nodes[0].id, "prod");
+    }
+
+    #[test]
+    fn tests_for_labels_direct_and_candidate_evidence_without_coverage_claims() {
+        let conn = Connection::open_in_memory().unwrap();
+        db::init_schema(&conn).unwrap();
+
+        let target = db::Node {
+            id: "src/lib.rs::render".to_string(),
+            name: "render".to_string(),
+            kind: "function".to_string(),
+            qualified_name: Some("render".to_string()),
+            file_path: "src/lib.rs".to_string(),
+            start_line: 1,
+            end_line: 3,
+            start_column: 0,
+            end_column: 1,
+            signature: None,
+            doc_comment: None,
+            is_test: false,
+            resolution_kind: None,
+            confidence: None,
+        };
+        let sibling = db::Node {
+            id: "src/lib.rs::render_page".to_string(),
+            name: "render_page".to_string(),
+            qualified_name: Some("render_page".to_string()),
+            ..target.clone()
+        };
+        let test = db::Node {
+            id: "tests/render_tests.rs::render_page_uses_render".to_string(),
+            name: "render_page_uses_render".to_string(),
+            qualified_name: Some("render_page_uses_render".to_string()),
+            file_path: "tests/render_tests.rs".to_string(),
+            is_test: true,
+            ..target.clone()
+        };
+        let module_candidate = db::Node {
+            id: "tests/render_tests.rs::module_probe".to_string(),
+            name: "module_probe".to_string(),
+            qualified_name: Some("module_probe".to_string()),
+            file_path: "tests/render_tests.rs".to_string(),
+            is_test: true,
+            ..target.clone()
+        };
+        let name_candidate = db::Node {
+            id: "tests/render_tests.rs::render_name_probe".to_string(),
+            name: "render_name_probe".to_string(),
+            qualified_name: Some("render_name_probe".to_string()),
+            file_path: "tests/render_tests.rs".to_string(),
+            is_test: true,
+            ..target.clone()
+        };
+        for node in [&target, &sibling, &test, &module_candidate, &name_candidate] {
+            db::upsert_node(&conn, node).unwrap();
+        }
+        for target_id in [&target.id, &sibling.id] {
+            db::upsert_edge(
+                &conn,
+                &db::Edge {
+                    source_id: test.id.clone(),
+                    target_id: target_id.clone(),
+                    kind: "calls".to_string(),
+                    resolution_kind: 5,
+                },
+            )
+            .unwrap();
+        }
+        db::upsert_edge(
+            &conn,
+            &db::Edge {
+                source_id: module_candidate.id.clone(),
+                target_id: sibling.id.clone(),
+                kind: "calls".to_string(),
+                resolution_kind: 5,
+            },
+        )
+        .unwrap();
+        // A future relationship kind between the same test/target must not be
+        // relabelled as direct call evidence.
+        db::upsert_edge(
+            &conn,
+            &db::Edge {
+                source_id: name_candidate.id.clone(),
+                target_id: target.id.clone(),
+                kind: "tests".to_string(),
+                resolution_kind: 5,
+            },
+        )
+        .unwrap();
+
+        let items = collect_tests_for(&conn, &target, false).unwrap();
+        assert_eq!(
+            items
+                .iter()
+                .map(|item| (item.test.id.as_str(), item.evidence))
+                .collect::<Vec<_>>(),
+            vec![
+                (
+                    "tests/render_tests.rs::render_page_uses_render",
+                    "direct_call"
+                ),
+                (
+                    "tests/render_tests.rs::module_probe",
+                    "same_module_candidate"
+                ),
+                ("tests/render_tests.rs::render_name_probe", "name_heuristic"),
+            ]
+        );
+        assert_eq!(items[0].confidence, 100);
+        assert_eq!(items[1].confidence, 60);
+        assert_eq!(items[2].confidence, 30);
+        assert!(items[2].confidence <= 60);
+        assert_eq!(items[1].path[0].relationship, "references");
+        assert_eq!(items[1].path[0].resolution_kind, "same_module_candidate");
+        assert_eq!(items[2].path[0].relationship, "tests");
+        assert_eq!(items[2].evidence, "name_heuristic");
+
+        assert!(collect_tests_for(&conn, &target, true).unwrap().is_empty());
+    }
+
+    #[test]
+    fn tests_for_requires_scope_for_ambiguous_simple_names() {
+        let conn = Connection::open_in_memory().unwrap();
+        db::init_schema(&conn).unwrap();
+        let left = db::Node {
+            id: "src/left.rs::run".to_string(),
+            name: "run".to_string(),
+            kind: "function".to_string(),
+            qualified_name: Some("run".to_string()),
+            file_path: "src/left.rs".to_string(),
+            start_line: 1,
+            end_line: 1,
+            start_column: 0,
+            end_column: 0,
+            signature: None,
+            doc_comment: None,
+            is_test: false,
+            resolution_kind: None,
+            confidence: None,
+        };
+        let right = db::Node {
+            id: "src/right.rs::run".to_string(),
+            file_path: "src/right.rs".to_string(),
+            ..left.clone()
+        };
+        db::upsert_node(&conn, &left).unwrap();
+        db::upsert_node(&conn, &right).unwrap();
+
+        let ambiguous = resolve_one_node(&conn, "run", None).unwrap();
+        assert!(ambiguous.target.is_none());
+        assert_eq!(ambiguous.warnings[0]["code"], "ambiguous_symbol");
+
+        let scoped = resolve_one_node(&conn, "run", Some("src/right")).unwrap();
+        assert_eq!(scoped.target.unwrap().id, right.id);
+
+        let exact = resolve_one_node(&conn, &left.id, None).unwrap();
+        assert_eq!(exact.target.unwrap().id, left.id);
     }
 }
