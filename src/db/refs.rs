@@ -48,3 +48,36 @@ pub fn get_unresolved_source_ids_by_specifier_simple(
     source_ids.dedup();
     Ok(source_ids)
 }
+
+/// Classify an unresolved endpoint without discarding a framework-qualified
+/// declaration. An unrelated method sharing the final name does not make a
+/// missing `grpc::Service::method` endpoint ambiguous.
+pub fn unresolved_reason(
+    conn: &Connection,
+    specifier: &str,
+    kind: &str,
+) -> rusqlite::Result<String> {
+    if matches!(kind, "macro_or_function" | "indirect_call") {
+        return Ok(kind.to_string());
+    }
+    let framework_qualified = kind != "calls" && specifier.contains("::");
+    let candidates: i64 = if framework_qualified {
+        conn.query_row(
+            "SELECT COUNT(*) FROM nodes WHERE qualified_name = ?1",
+            [specifier],
+            |row| row.get(0),
+        )?
+    } else {
+        let simple = specifier.rsplit("::").next().unwrap_or(specifier);
+        conn.query_row(
+            "SELECT COUNT(*) FROM nodes WHERE name = ?1",
+            [simple],
+            |row| row.get(0),
+        )?
+    };
+    Ok(if candidates > 0 {
+        "ambiguous_target".to_string()
+    } else {
+        "missing_target".to_string()
+    })
+}

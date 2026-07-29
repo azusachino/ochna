@@ -424,11 +424,15 @@ pub fn run_init(workspace: &Path, include_library: bool) -> Result<(), Box<dyn E
         let mut seen_calls = FxHashSet::default();
         for source_id in &affected_source_ids {
             db::delete_edges_for_source_id(&tx, source_id)?;
+            db::delete_reverse_framework_edges_for_target_id(&tx, source_id)?;
             db::delete_unresolved_refs_for_source_id(&tx, source_id)?;
             for call in db::get_raw_calls_for_source_id(&tx, source_id)? {
                 let key = (
                     call.caller_id.clone(),
                     call.callee_name.clone(),
+                    call.relationship_kind.clone(),
+                    call.reverse_edge,
+                    call.target_qualified_hint.clone(),
                     call.line,
                     call.column,
                 );

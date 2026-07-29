@@ -29,6 +29,23 @@ pub fn delete_edges_for_source_id(conn: &Connection, source_id: &str) -> rusqlit
     Ok(())
 }
 
+/// Reverse framework relations are stored dependency/event -> consumer even
+/// though their raw relationship is owned by the consumer. Replaying that raw
+/// source must invalidate only those reverse edges, not unrelated incoming
+/// calls to the same node.
+pub fn delete_reverse_framework_edges_for_target_id(
+    conn: &Connection,
+    target_id: &str,
+) -> rusqlite::Result<()> {
+    conn.execute(
+        "DELETE FROM edges
+         WHERE target_nid = (SELECT nid FROM nodes WHERE id = ?)
+           AND kind IN ('injected_into', 'consumes_event')",
+        [target_id],
+    )?;
+    Ok(())
+}
+
 /// Return the actual indexed edge metadata between two symbols. Query commands
 /// use this rather than recreating edge confidence from a related node.
 pub fn find_edges_between(

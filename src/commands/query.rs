@@ -161,7 +161,7 @@ fn query_nodes_by_id_or_qual(conn: &Connection, symbol: &str) -> rusqlite::Resul
 
 #[derive(Clone, Serialize)]
 struct RelationshipPath {
-    relationship: &'static str,
+    relationship: String,
     source: db::Node,
     target: db::Node,
     resolution_kind: String,
@@ -219,12 +219,7 @@ fn resolve_one_node(
 
 fn edge_path(source: &db::Node, target: &db::Node, edge: &db::EdgeRecord) -> RelationshipPath {
     RelationshipPath {
-        relationship: match edge.kind.as_str() {
-            "calls" => "calls",
-            "tests" => "tests",
-            "contains" => "contains",
-            _ => "references",
-        },
+        relationship: edge.kind.clone(),
         source: source.clone(),
         target: target.clone(),
         resolution_kind: edge.resolution_kind.clone(),
@@ -275,7 +270,7 @@ fn collect_tests_for(
                 test: test.clone(),
                 confidence: 60,
                 path: vec![RelationshipPath {
-                    relationship: "references",
+                    relationship: "references".to_string(),
                     source: test.clone(),
                     target: target.clone(),
                     resolution_kind: "same_module_candidate".to_string(),
@@ -296,7 +291,7 @@ fn collect_tests_for(
                 test: test.clone(),
                 confidence: 30,
                 path: vec![RelationshipPath {
-                    relationship: "tests",
+                    relationship: "tests".to_string(),
                     source: test.clone(),
                     target: target.clone(),
                     resolution_kind: "name_heuristic".to_string(),
@@ -405,6 +400,8 @@ struct AffectedTest {
 #[derive(Serialize)]
 struct UnresolvedBoundary {
     source: db::Node,
+    relationship: String,
+    target: Option<db::Node>,
     specifier: String,
     reason: String,
     path_id: String,
@@ -514,21 +511,11 @@ fn impact_unresolved_for(
     let mut boundaries = Vec::new();
     for row in rows {
         let (specifier, kind) = row?;
-        let simple = specifier.rsplit("::").next().unwrap_or(&specifier);
-        let candidates: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM nodes WHERE name = ?1",
-            [simple],
-            |row| row.get(0),
-        )?;
-        let reason = if matches!(kind.as_str(), "macro_or_function" | "indirect_call") {
-            kind
-        } else if candidates > 0 {
-            "ambiguous_target".to_string()
-        } else {
-            "missing_target".to_string()
-        };
+        let reason = db::unresolved_reason(conn, &specifier, &kind)?;
         boundaries.push(UnresolvedBoundary {
             source: source.clone(),
+            relationship: kind,
+            target: None,
             specifier,
             reason,
             path_id: path_id.to_string(),
@@ -730,13 +717,22 @@ pub(crate) fn run_impact(
         ImpactDirection::Callees => "callees",
         ImpactDirection::Both => "both",
     };
-    let warning_values = if truncated {
+    let mut warning_values = if truncated {
         vec![
             json!({"code":"truncated","message":format!("result budget reached; frontier not walked: {}", truncated_frontiers.first().map(String::as_str).unwrap_or("unknown"))}),
         ]
     } else {
         Vec::new()
     };
+    if boundaries
+        .iter()
+        .any(|boundary| boundary.relationship != "calls")
+    {
+        warning_values.push(json!({
+            "code":"unresolved_framework_endpoint",
+            "message":"A framework relationship endpoint is not indexed; its target is null rather than inferred from a same-named symbol."
+        }));
+    }
     if json {
         println!(
             "{}",
@@ -783,8 +779,12 @@ pub(crate) fn run_impact(
         println!("Unresolved boundaries:");
         for boundary in &boundaries {
             println!(
-                "- {} -> {} ({}, {})",
-                boundary.source.id, boundary.specifier, boundary.reason, boundary.path_id
+                "- {} -[{}]-> null ({}, {}, {})",
+                boundary.source.id,
+                boundary.relationship,
+                boundary.specifier,
+                boundary.reason,
+                boundary.path_id
             );
         }
         if boundaries.is_empty() {

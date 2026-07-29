@@ -27,7 +27,7 @@ Use this to cut noise on common method names in large Go/Java corpora.
 `@RequestMapping` paths with method-level `@GetMapping`, `@PostMapping`,
 `@PutMapping`, `@DeleteMapping`, `@PatchMapping`, and `@RequestMapping`
 annotations. Route nodes are named like `GET /api/users/{id}` or
-`ANY /api/status` and have call edges to their handler methods, so
+`ANY /api/status` and have `route_handler` edges to their handler methods, so
 `ochna explore "/api"` or `ochna callers <handler>` can reveal HTTP entry
 points as graph nodes.
 

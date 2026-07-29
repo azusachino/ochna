@@ -272,19 +272,7 @@ fn unresolved_rows(
     }
     let mut result = Vec::with_capacity(rows.len());
     for (source, specifier, kind, file_path, line, column) in rows {
-        let simple = specifier.rsplit("::").next().unwrap_or(&specifier);
-        let candidates: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM nodes WHERE name = ?1",
-            [simple],
-            |row| row.get(0),
-        )?;
-        let reason = if matches!(kind.as_str(), "macro_or_function" | "indirect_call") {
-            kind.clone()
-        } else if candidates > 0 {
-            "ambiguous_target".to_string()
-        } else {
-            "missing_target".to_string()
-        };
+        let reason = db::unresolved_reason(conn, &specifier, &kind)?;
         result.push(UnresolvedRow {
             source,
             specifier,

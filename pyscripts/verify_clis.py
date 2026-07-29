@@ -159,6 +159,45 @@ def main() -> int:
         assert status["counts"]["nodes"] >= 3
         assert status["freshness"] == "fresh"
 
+        # --- Java framework relationships: add and incrementally index a
+        # source after the baseline health checks, then exercise the installed CLI.
+        (tmp / "src" / "App.java").write_text(
+            "@RestController class ApiController {\n"
+            "  private final Orders orders;\n"
+            "  ApiController(Orders orders) { this.orders = orders; }\n"
+            "  @GetMapping(\"/orders\") public String list() { return \"ok\"; }\n"
+            "}\ninterface Orders {}\n"
+            "@ConfigurationProperties(\"billing\") class BillingProperties {}\n"
+            "@FeignClient(name = \"catalog\") interface CatalogClient {\n"
+            "  @GetMapping(\"/products\") Product getProduct();\n"
+            "}\nclass Product {}\n"
+            "@Component class RpcClient {\n"
+            "  MissingGrpc.MissingBlockingStub stub;\n"
+            "  void call() { stub.get(new Request()); }\n"
+            "}\nclass Request {}\n",
+            encoding="utf-8",
+        )
+        run([ochna, "sync"], tmp)
+        route_impact = assert_json(run([ochna, "--json", "impact", "src/App.java::ApiController::list::route::GET /orders"], tmp).stdout)
+        assert any(edge["relationship"] == "route_handler" and edge["resolution_kind"] == "framework_annotation" and edge["confidence"] == 85 for edge in route_impact["data"]["edges"])
+        injection_impact = assert_json(run([ochna, "--json", "impact", "src/App.java::ApiController"], tmp).stdout)
+        assert any(edge["relationship"] == "injected_into" and edge["resolution_kind"] == "framework_convention" for edge in injection_impact["data"]["edges"])
+        feign_impact = assert_json(run([ochna, "--json", "impact", "src/App.java::CatalogClient::getProduct"], tmp).stdout)
+        assert any(edge["relationship"] == "feign_calls" and edge["resolution_kind"] == "framework_annotation" for edge in feign_impact["data"]["edges"])
+        grpc_boundary = assert_json(run([
+            ochna, "--json", "impact", "src/App.java::RpcClient::call"
+        ], tmp).stdout)
+        assert any(
+            boundary["relationship"] == "grpc_calls"
+            and boundary["target"] is None
+            and boundary["reason"] == "missing_target"
+            for boundary in grpc_boundary["data"]["unresolved_boundaries"]
+        )
+        assert any(
+            warning["code"] == "unresolved_framework_endpoint"
+            for warning in grpc_boundary["warnings"]
+        )
+
         # --- search: finds the symbol; --no-tests drops test-path symbols ---
         search = assert_json(run([ochna, "--json", "search", "helper"], tmp).stdout)
         names = {n["name"] for n in search}

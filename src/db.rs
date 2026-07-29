@@ -7,7 +7,10 @@ mod raw_calls;
 mod refs;
 mod schema;
 
-pub use edges::{delete_edges_for_source_id, find_edges_between, upsert_edge};
+pub use edges::{
+    delete_edges_for_source_id, delete_reverse_framework_edges_for_target_id, find_edges_between,
+    upsert_edge,
+};
 pub use files::{
     get_file_metadata, get_project_metadata, upsert_file_metadata, upsert_project_metadata,
 };
@@ -21,7 +24,7 @@ pub use raw_calls::{
 };
 pub use refs::{
     delete_unresolved_refs_for_source_id, get_unresolved_source_ids_by_specifier_simple,
-    insert_unresolved_ref,
+    insert_unresolved_ref, unresolved_reason,
 };
 pub use schema::{
     create_node_fts_triggers, drop_node_fts_triggers, init_schema, rebuild_node_fts, SCHEMA_VERSION,
@@ -103,6 +106,15 @@ pub struct RawCall {
     pub receiver_type: Option<String>,
     pub package_or_namespace: Option<String>,
     pub import_hint: Option<String>,
+    /// Stable graph relationship token. Ordinary AST invocations use `calls`.
+    pub relationship_kind: String,
+    /// Framework relationships whose natural reading is target <- source store
+    /// their discovered endpoint as the callee and reverse it at resolution.
+    pub reverse_edge: bool,
+    /// A parser-derived qualified target identity for framework declarations.
+    pub target_qualified_hint: Option<String>,
+    /// Parser-supplied framework evidence tier; ordinary calls use the resolver.
+    pub resolution_hint: Option<i64>,
     pub line: i64,
     pub column: i64,
 }
@@ -120,6 +132,10 @@ impl RawCall {
             receiver_type: None,
             package_or_namespace: None,
             import_hint: None,
+            relationship_kind: "calls".to_string(),
+            reverse_edge: false,
+            target_qualified_hint: None,
+            resolution_hint: None,
             line,
             column,
         }
@@ -142,6 +158,9 @@ pub fn confidence_for_kind(resolution_kind: i64) -> i64 {
         3 => 80,  // package
         4 => 90,  // receiver_type
         5 => 100, // exact
+        6 => 85,  // framework_annotation
+        7 => 70,  // framework_convention
+        8 => 80,  // framework_declaration
         _ => 30,
     }
 }
@@ -154,6 +173,9 @@ pub fn label_for_kind(resolution_kind: i64) -> &'static str {
         3 => "package",
         4 => "receiver_type",
         5 => "exact",
+        6 => "framework_annotation",
+        7 => "framework_convention",
+        8 => "framework_declaration",
         _ => "unknown",
     }
 }
@@ -181,8 +203,8 @@ pub(crate) fn map_row_to_node(row: &rusqlite::Row) -> rusqlite::Result<Node> {
 pub(crate) fn map_row_to_raw_call(row: &rusqlite::Row) -> rusqlite::Result<RawCall> {
     let caller_id: String = row.get(0)?;
     let callee_name: String = row.get(1)?;
-    let line: i64 = row.get(9)?;
-    let column: i64 = row.get(10)?;
+    let line: i64 = row.get(13)?;
+    let column: i64 = row.get(14)?;
     let mut call = RawCall::new(caller_id, callee_name, line, column);
     if let Some(callee_simple) = row.get::<_, Option<String>>(2)? {
         call.callee_simple = callee_simple;
@@ -193,6 +215,10 @@ pub(crate) fn map_row_to_raw_call(row: &rusqlite::Row) -> rusqlite::Result<RawCa
     call.receiver_type = row.get(6)?;
     call.package_or_namespace = row.get(7)?;
     call.import_hint = row.get(8)?;
+    call.relationship_kind = row.get(9)?;
+    call.reverse_edge = row.get::<_, i64>(10)? != 0;
+    call.target_qualified_hint = row.get(11)?;
+    call.resolution_hint = row.get(12)?;
     Ok(call)
 }
 

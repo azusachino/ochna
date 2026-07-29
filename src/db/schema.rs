@@ -7,7 +7,7 @@ use rusqlite::Connection;
 
 /// Current on-disk schema version. Bump when a change is not backward
 /// compatible; `init_schema` then drops the data tables and the caller rebuilds.
-pub const SCHEMA_VERSION: i64 = 5;
+pub const SCHEMA_VERSION: i64 = 6;
 
 // `nid` aliases rowid (the compact surrogate referenced by every edge/call);
 // `id` keeps the human-readable "file::symbol" key, UNIQUE so resolution and
@@ -69,6 +69,10 @@ const RAW_CALLS: &str = "CREATE TABLE IF NOT EXISTS raw_calls (
         receiver_type TEXT,
         package_or_namespace TEXT,
         import_hint TEXT,
+        relationship_kind TEXT NOT NULL DEFAULT 'calls',
+        reverse_edge INTEGER NOT NULL DEFAULT 0,
+        target_qualified_hint TEXT,
+        resolution_hint INTEGER,
         line INTEGER NOT NULL,
         column INTEGER NOT NULL,
         FOREIGN KEY (caller_nid) REFERENCES nodes(nid) ON DELETE CASCADE

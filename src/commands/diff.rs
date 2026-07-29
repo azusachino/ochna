@@ -274,19 +274,7 @@ fn unresolved_for_new_lines(
     for row in rows {
         let (source, path, specifier, kind, line) = row?;
         if source_ids.contains(&source) && new_lines.contains(&(path, line)) {
-            let simple = specifier.rsplit("::").next().unwrap_or(&specifier);
-            let candidates: i64 = conn.query_row(
-                "SELECT COUNT(*) FROM nodes WHERE name = ?",
-                [simple],
-                |row| row.get(0),
-            )?;
-            let reason = if matches!(kind.as_str(), "macro_or_function" | "indirect_call") {
-                kind
-            } else if candidates > 0 {
-                "ambiguous_target".to_string()
-            } else {
-                "missing_target".to_string()
-            };
+            let reason = db::unresolved_reason(conn, &specifier, &kind)?;
             result.push(json!({"source": source, "specifier": specifier, "reason": reason}));
         }
     }
@@ -307,19 +295,7 @@ fn unresolved_snapshot(conn: &Connection) -> rusqlite::Result<BTreeSet<(String, 
     let mut unresolved = BTreeSet::new();
     for row in rows {
         let (source, specifier, kind) = row?;
-        let simple = specifier.rsplit("::").next().unwrap_or(&specifier);
-        let candidates: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM nodes WHERE name = ?",
-            [simple],
-            |row| row.get(0),
-        )?;
-        let reason = if matches!(kind.as_str(), "macro_or_function" | "indirect_call") {
-            kind
-        } else if candidates > 0 {
-            "ambiguous_target".to_string()
-        } else {
-            "missing_target".to_string()
-        };
+        let reason = db::unresolved_reason(conn, &specifier, &kind)?;
         unresolved.insert((source, specifier, reason));
     }
     Ok(unresolved)

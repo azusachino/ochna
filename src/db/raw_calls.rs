@@ -9,8 +9,8 @@ pub fn insert_raw_call(conn: &Connection, r: &RawCall) -> rusqlite::Result<()> {
         "INSERT INTO raw_calls (
             caller_nid, callee_name, callee_simple, callee_scope,
             call_kind, receiver_expr, receiver_type, package_or_namespace, import_hint,
-            line, column
-         ) SELECT nid, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11 FROM nodes WHERE id = ?1",
+            relationship_kind, reverse_edge, target_qualified_hint, resolution_hint, line, column
+         ) SELECT nid, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15 FROM nodes WHERE id = ?1",
     )?;
     stmt.execute((
         &r.caller_id,
@@ -22,6 +22,10 @@ pub fn insert_raw_call(conn: &Connection, r: &RawCall) -> rusqlite::Result<()> {
         &r.receiver_type,
         &r.package_or_namespace,
         &r.import_hint,
+        &r.relationship_kind,
+        i64::from(r.reverse_edge),
+        &r.target_qualified_hint,
+        r.resolution_hint,
         r.line,
         r.column,
     ))?;
@@ -48,6 +52,7 @@ pub fn get_raw_calls_for_source_id(
     let mut stmt = conn.prepare(
         "SELECT n.id, r.callee_name, r.callee_simple, r.callee_scope,
                 r.call_kind, r.receiver_expr, r.receiver_type, r.package_or_namespace, r.import_hint,
+                r.relationship_kind, r.reverse_edge, r.target_qualified_hint, r.resolution_hint,
                 r.line, r.column
          FROM raw_calls r
          JOIN nodes n ON n.nid = r.caller_nid
@@ -62,6 +67,7 @@ pub fn get_all_raw_calls(conn: &Connection) -> rusqlite::Result<Vec<RawCall>> {
     let mut stmt = conn.prepare(
         "SELECT n.id, r.callee_name, r.callee_simple, r.callee_scope,
                 r.call_kind, r.receiver_expr, r.receiver_type, r.package_or_namespace, r.import_hint,
+                r.relationship_kind, r.reverse_edge, r.target_qualified_hint, r.resolution_hint,
                 r.line, r.column
          FROM raw_calls r
          JOIN nodes n ON n.nid = r.caller_nid",
@@ -72,4 +78,48 @@ pub fn get_all_raw_calls(conn: &Connection) -> rusqlite::Result<Vec<RawCall>> {
         calls.push(r?);
     }
     Ok(calls)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db::{init_schema, upsert_node, Node};
+
+    fn node(id: &str, name: &str) -> Node {
+        Node {
+            id: id.to_string(),
+            name: name.to_string(),
+            kind: "class".to_string(),
+            qualified_name: Some(name.to_string()),
+            file_path: "App.java".to_string(),
+            start_line: 1,
+            end_line: 1,
+            start_column: 0,
+            end_column: 1,
+            signature: None,
+            doc_comment: None,
+            is_test: false,
+            resolution_kind: None,
+            confidence: None,
+        }
+    }
+
+    #[test]
+    fn relationship_metadata_survives_raw_call_round_trip() {
+        let conn = Connection::open_in_memory().unwrap();
+        init_schema(&conn).unwrap();
+        upsert_node(&conn, &node("App.java::Consumer", "Consumer")).unwrap();
+        let mut relation = RawCall::new(
+            "App.java::Consumer".to_string(),
+            "Dependency".to_string(),
+            4,
+            2,
+        );
+        relation.relationship_kind = "injected_into".to_string();
+        relation.reverse_edge = true;
+        relation.target_qualified_hint = Some("pkg::Dependency".to_string());
+        relation.resolution_hint = Some(6);
+        insert_raw_call(&conn, &relation).unwrap();
+        assert_eq!(get_all_raw_calls(&conn).unwrap(), vec![relation]);
+    }
 }

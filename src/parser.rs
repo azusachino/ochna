@@ -139,6 +139,14 @@ pub fn parse_code(
             &imports,
             None,
         );
+        java::extract_framework_relationships(
+            tree.root_node(),
+            content,
+            file_path,
+            &mut nodes,
+            &mut raw_calls,
+            package_name.as_deref(),
+        );
     } else if lang == "c" || lang == "cpp" || lang == "c++" || lang == "cc" || lang == "cxx" {
         traverse_c_like(
             tree.root_node(),
@@ -730,7 +738,7 @@ public class UserController {
 
         let edge_get = edges.iter().find(|e| e.source_id == route_get.id).unwrap();
         assert_eq!(edge_get.target_id, get_user.id);
-        assert_eq!(edge_get.kind, "calls");
+        assert_eq!(edge_get.kind, "route_handler");
 
         let edge_create1 = edges
             .iter()
@@ -761,6 +769,7 @@ public class FirstController {
     public String status() {
         return "first";
     }
+
 }
 "#;
         let second = r#"
@@ -812,6 +821,134 @@ public class SecondController {
         assert!(edges
             .iter()
             .any(|e| e.source_id == second_route.id && e.target_id == second_status.id));
+    }
+
+    #[test]
+    fn test_parse_java_framework_relationships_are_explicit_and_non_exact() {
+        let java_code = r#"
+@RestController class ApiController {
+    private final Orders orders;
+    ApiController(Orders orders) { this.orders = orders; }
+    @GetMapping("/orders") public String list() { return "ok"; }
+}
+interface Orders {}
+@ConfigurationProperties("billing") class BillingProperties {}
+@Component class Publisher {
+    @Value("${billing.timeout}") String timeout;
+    ApplicationEventPublisher events;
+    void publish() { events.publishEvent(new InvoiceCreated()); }
+}
+class InvoiceCreated {}
+@Component class Listener {
+  @EventListener(InvoiceCreated.class) void receive(InvoiceCreated event) {}
+  @EventListener void inferred(InvoiceCreated event) {}
+}
+@Component class TypedPublisher {
+  ApplicationEventPublisher events;
+  void publishTyped() { InvoiceCreated event = new InvoiceCreated(); events.publishEvent(event); }
+  void noise() { String text = "publishEvent(new WrongEvent())"; }
+}
+class WrongEvent {}
+@FeignClient(name = "catalog") interface CatalogClient { @GetMapping("/products") Product getProduct(); }
+class Product {}
+@GrpcService class HelloService extends HelloGrpc.HelloImplBase { void sayHello(Request request) {} }
+@Component class HelloClient { HelloGrpc.HelloBlockingStub stub; void call() { stub.sayHello(new Request()); } }
+class Request {}
+@Component class Outer { class Nested { Nested(Orders orders) {} } }
+"#;
+        let (nodes, calls) = parse_code("src/App.java", java_code, "java").unwrap();
+        let edges = resolve_calls_local(&nodes, &calls);
+        let edge = |kind: &str, source_suffix: &str, target_suffix: &str| {
+            edges.iter().find(|edge| {
+                edge.kind == kind
+                    && edge.source_id.ends_with(source_suffix)
+                    && edge.target_id.ends_with(target_suffix)
+            })
+        };
+        assert_eq!(
+            edge("route_handler", "route::GET /orders", "ApiController::list")
+                .unwrap()
+                .resolution_kind,
+            6
+        );
+        assert_eq!(
+            edge("injected_into", "Orders", "ApiController")
+                .unwrap()
+                .resolution_kind,
+            7
+        );
+        assert!(edge(
+            "configuration_binds",
+            "config::billing::BillingProperties",
+            "BillingProperties"
+        )
+        .is_some());
+        assert!(edge(
+            "configuration_binds",
+            "config::billing.timeout::Publisher",
+            "Publisher"
+        )
+        .is_some());
+        assert!(edge("publishes_event", "Publisher::publish", "InvoiceCreated").is_some());
+        assert!(edge(
+            "publishes_event",
+            "TypedPublisher::publishTyped",
+            "InvoiceCreated"
+        )
+        .is_some());
+        assert!(edge("publishes_event", "TypedPublisher::noise", "WrongEvent").is_none());
+        assert!(edge("consumes_event", "InvoiceCreated", "Listener::receive").is_some());
+        assert!(edge("consumes_event", "InvoiceCreated", "Listener::inferred").is_some());
+        assert!(edge(
+            "feign_calls",
+            "CatalogClient::getProduct",
+            "feign::catalog::CatalogClient::getProduct"
+        )
+        .is_some());
+        assert!(edge("grpc_calls", "HelloClient::call", "grpc::Hello::sayHello").is_some());
+        assert!(
+            edges
+                .iter()
+                .filter(|edge| edge.kind != "calls")
+                .all(|edge| edge.resolution_kind != 5),
+            "{edges:?}"
+        );
+
+        let plain = r#"class Plain { Plain(Orders orders) {} } interface Orders {}"#;
+        let (plain_nodes, plain_calls) = parse_code("src/Plain.java", plain, "java").unwrap();
+        assert!(resolve_calls_local(&plain_nodes, &plain_calls)
+            .iter()
+            .all(|edge| edge.kind != "injected_into"));
+        assert!(edges
+            .iter()
+            .all(|edge| !edge.target_id.ends_with("Outer::Nested")));
+
+        let mut missing_endpoint = RawCall::new(
+            "src/App.java::CatalogClient::getProduct".to_string(),
+            "getProduct".to_string(),
+            1,
+            0,
+        );
+        missing_endpoint.relationship_kind = "feign_calls".to_string();
+        missing_endpoint.target_qualified_hint = Some("feign::catalog::missing".to_string());
+        missing_endpoint.resolution_hint = Some(6);
+        let (missing_edges, missing_unresolved) =
+            resolve_calls_global(&[missing_endpoint], &SymbolIndex::from_nodes(&nodes));
+        assert!(missing_edges.is_empty());
+        assert_eq!(missing_unresolved.len(), 1);
+        assert_eq!(missing_unresolved[0].kind, "feign_calls");
+
+        let mut duplicate_name = RawCall::new(
+            "src/App.java::ApiController".to_string(),
+            "getProduct".to_string(),
+            1,
+            0,
+        );
+        duplicate_name.relationship_kind = "injected_into".to_string();
+        duplicate_name.resolution_hint = Some(6);
+        let (duplicate_edges, _) =
+            resolve_calls_global(&[duplicate_name], &SymbolIndex::from_nodes(&nodes));
+        assert!(duplicate_edges.iter().all(|edge| edge.resolution_kind != 6));
     }
 
     #[test]

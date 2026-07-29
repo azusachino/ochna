@@ -23,6 +23,39 @@ pub fn resolve_calls_global(
     for call in calls {
         let (call_namespace, simple_name) = call_namespace_and_simple_name(&call.callee_name);
 
+        // A framework declaration names its endpoint explicitly. It is an
+        // all-or-nothing contract: an absent or ambiguous declaration is an
+        // unresolved framework boundary, never a license to fall back to a
+        // same-named ordinary symbol.
+        if let Some(qualified_hint) = call.target_qualified_hint.as_deref() {
+            let hinted = index.by_qualified_name.get(qualified_hint);
+            if let Some(candidates) = hinted.filter(|candidates| candidates.len() == 1) {
+                let target_id =
+                    index.strings[index.symbols[candidates[0] as usize].id as usize].clone();
+                let (source_id, target_id) = if call.reverse_edge {
+                    (target_id, call.caller_id.clone())
+                } else {
+                    (call.caller_id.clone(), target_id)
+                };
+                edges.push(Edge {
+                    source_id,
+                    target_id,
+                    kind: call.relationship_kind.clone(),
+                    resolution_kind: call.resolution_hint.unwrap_or(8),
+                });
+            } else {
+                unresolved.push(UnresolvedRef {
+                    id: None,
+                    source_id: call.caller_id.clone(),
+                    specifier: qualified_hint.to_string(),
+                    kind: call.relationship_kind.clone(),
+                    line: call.line,
+                    column: call.column,
+                });
+            }
+            continue;
+        }
+
         let candidates = match index.by_name.get(simple_name) {
             Some(indices) if !indices.is_empty() => indices,
             _ => {
@@ -30,7 +63,7 @@ pub fn resolve_calls_global(
                     id: None,
                     source_id: call.caller_id.clone(),
                     specifier: call.callee_name.clone(),
-                    kind: "calls".to_string(),
+                    kind: call.relationship_kind.clone(),
                     line: call.line,
                     column: call.column,
                 });
@@ -203,11 +236,20 @@ pub fn resolve_calls_global(
         if !resolved_targets.is_empty() {
             for (target_ix, kind) in resolved_targets {
                 let target_id = get_string(index.symbols[target_ix as usize].id).to_string();
+                let (source_id, target_id) = if call.reverse_edge {
+                    (target_id, call.caller_id.clone())
+                } else {
+                    (call.caller_id.clone(), target_id)
+                };
                 edges.push(Edge {
-                    source_id: call.caller_id.clone(),
+                    source_id,
                     target_id,
-                    kind: "calls".to_string(),
-                    resolution_kind: kind,
+                    kind: call.relationship_kind.clone(),
+                    resolution_kind: if call.relationship_kind != "calls" && candidates.len() == 1 {
+                        call.resolution_hint.unwrap_or(kind)
+                    } else {
+                        kind
+                    },
                 });
             }
         } else {
@@ -215,7 +257,7 @@ pub fn resolve_calls_global(
                 id: None,
                 source_id: call.caller_id.clone(),
                 specifier: call.callee_name.clone(),
-                kind: "calls".to_string(),
+                kind: call.relationship_kind.clone(),
                 line: call.line,
                 column: call.column,
             });

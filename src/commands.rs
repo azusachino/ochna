@@ -514,6 +514,11 @@ mod tests {
             "fn caller() {\n    target();\n    local_keep();\n}\nfn local_keep() {}\n",
         )
         .unwrap();
+        fs::write(
+            src_dir.join("incoming.rs"),
+            "fn incoming() {\n    caller();\n}\n",
+        )
+        .unwrap();
         fs::write(&old_target_file, "fn target() {}\n").unwrap();
 
         run_init(&temp_workspace, false).unwrap();
@@ -561,6 +566,19 @@ mod tests {
         assert_eq!(
             preserved_edge, 1,
             "other edges from the source are reinserted"
+        );
+        let preserved_incoming_edge: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM edges
+                 WHERE source_nid = (SELECT nid FROM nodes WHERE id = 'src/incoming.rs::incoming')
+                   AND target_nid = (SELECT nid FROM nodes WHERE id = 'src/a.rs::caller')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            preserved_incoming_edge, 1,
+            "replaying a caller must not delete unrelated incoming edges"
         );
 
         fs::remove_dir_all(&temp_workspace).unwrap();
@@ -909,5 +927,77 @@ mod tests {
         assert!(java_call.contains(&r#"Some("io.netty.channel.ChannelPromise")"#.to_string()));
 
         fs::remove_dir_all(&temp_workspace).unwrap();
+    }
+
+    #[test]
+    fn framework_relationships_survive_incremental_reindex() {
+        let workspace = create_temp_dir();
+        let source = workspace.join("App.java");
+        let base = r#"
+@RestController class Controller {
+  private final Dependency dependency;
+  Controller(Dependency dependency) { this.dependency = dependency; }
+  @GetMapping("/items") String items() { return "ok"; }
+}
+interface Dependency {}
+"#;
+        fs::write(&source, base).unwrap();
+        run_init(&workspace, false).unwrap();
+
+        let snapshot = |workspace: &PathBuf| -> (Vec<(String, String, String, i64)>, i64) {
+            let conn = Connection::open(workspace.join(".ochna/ochna.db")).unwrap();
+            let mut statement = conn
+                .prepare(
+                    "SELECT source.id, target.id, edges.kind, edges.resolution_kind
+                     FROM edges JOIN nodes source ON source.nid = edges.source_nid
+                     JOIN nodes target ON target.nid = edges.target_nid
+                     ORDER BY source.id, target.id, edges.kind",
+                )
+                .unwrap();
+            let edges = statement
+                .query_map([], |row| {
+                    Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+                })
+                .unwrap()
+                .map(Result::unwrap)
+                .collect();
+            let raw_count = conn
+                .query_row("SELECT COUNT(*) FROM raw_calls", [], |row| row.get(0))
+                .unwrap();
+            (edges, raw_count)
+        };
+        let (first, first_raw_count) = snapshot(&workspace);
+        assert!(first
+            .iter()
+            .any(|(_, _, kind, resolution)| kind == "route_handler" && *resolution == 6));
+        assert!(first.iter().any(|(source, target, kind, resolution)| source
+            .ends_with("Dependency")
+            && target.ends_with("Controller")
+            && kind == "injected_into"
+            && *resolution == 7));
+
+        fs::write(
+            &source,
+            format!("{base}\n@ConfigurationProperties(\"billing\") class Billing {{}}\n"),
+        )
+        .unwrap();
+        run_init(&workspace, false).unwrap();
+        let (second, second_raw_count) = snapshot(&workspace);
+        assert!(second.iter().any(|(_, _, kind, _)| kind == "route_handler"));
+        assert!(second.iter().any(|(_, _, kind, _)| kind == "injected_into"));
+        assert!(second
+            .iter()
+            .any(|(_, _, kind, _)| kind == "configuration_binds"));
+        assert!(second_raw_count > first_raw_count);
+        run_init(&workspace, false).unwrap();
+        assert_eq!(snapshot(&workspace), (second, second_raw_count));
+
+        fs::write(&source, "@RestController class Controller { @GetMapping(\"/items\") String items() { return \"ok\"; } }\n").unwrap();
+        run_init(&workspace, false).unwrap();
+        let (removed, _) = snapshot(&workspace);
+        assert!(removed
+            .iter()
+            .all(|(_, _, kind, _)| kind != "injected_into" && kind != "configuration_binds"));
+        fs::remove_dir_all(workspace).unwrap();
     }
 }
