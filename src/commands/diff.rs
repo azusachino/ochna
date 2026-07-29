@@ -10,6 +10,7 @@ use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::thread;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 const MAX_CHANGED_FILES: usize = 500;
@@ -82,12 +83,39 @@ impl TemporaryWorkspace {
         fs::create_dir(&path)?;
         Ok(Self(path))
     }
+
+    fn cleanup(mut self) -> std::io::Result<()> {
+        let path = std::mem::take(&mut self.0);
+        fs::remove_dir_all(path)
+    }
 }
 
 impl Drop for TemporaryWorkspace {
     fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.0);
+        if !self.0.as_os_str().is_empty() {
+            let _ = fs::remove_dir_all(&self.0);
+        }
     }
+}
+
+fn structured_failure(
+    json_mode: bool,
+    code: &str,
+    message: String,
+    next_action: &str,
+) -> Result<(), Box<dyn Error>> {
+    if json_mode {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&json!({
+                "contract_version": "0.3", "command": "diff", "ok": false,
+                "data": {"base": Value::Null, "head": Value::Null, "files": [], "symbols": [], "edges": [], "newly_unresolved_callers": [], "unmapped_hunks": [], "historical_snapshot": Value::Null},
+                "warnings": [{"code": code, "message": message}], "truncated": false,
+                "next_action": next_action
+            }))?
+        );
+    }
+    Err(message.into())
 }
 
 fn git(workspace: &Path, args: &[&str]) -> Result<String, Box<dyn Error>> {
@@ -390,17 +418,29 @@ fn archive_revision(
         .stdout
         .take()
         .ok_or("could not read git archive output")?;
-    let unpack = Command::new("tar")
-        .args(["-x", "-C"])
-        .arg(destination)
-        .stdin(archive_stdout)
-        .output()?;
+    let archive_stderr = archive
+        .stderr
+        .take()
+        .ok_or("could not read git archive diagnostics")?;
+    let stderr_reader = thread::spawn(move || -> std::io::Result<Vec<u8>> {
+        use std::io::Read;
+        let mut diagnostics = Vec::new();
+        let mut stderr = archive_stderr;
+        stderr.read_to_end(&mut diagnostics)?;
+        Ok(diagnostics)
+    });
+    let unpack = tar::Archive::new(archive_stdout).unpack(destination);
     let archive_output = archive.wait_with_output()?;
-    if !archive_output.status.success() || !unpack.status.success() {
+    let diagnostics = stderr_reader
+        .join()
+        .map_err(|_| "could not read git archive diagnostics")??;
+    if !archive_output.status.success() || unpack.is_err() {
         return Err(format!(
             "could not archive historical revision {revision}: {}{}",
-            String::from_utf8_lossy(&archive_output.stderr).trim(),
-            String::from_utf8_lossy(&unpack.stderr).trim()
+            String::from_utf8_lossy(&diagnostics).trim(),
+            unpack
+                .err()
+                .map_or_else(String::new, |error| format!("; {error}"))
         )
         .into());
     }
@@ -418,10 +458,10 @@ fn historical_snapshot(
     let conn = Connection::open(temporary.0.join(".ochna/ochna.db"))?;
     let graph = graph_snapshot(&conn)?;
     let temporary_bytes = directory_size(&temporary.0)?;
-    // `temporary` is deliberately dropped here, after all source and DB reads
-    // are complete and before this function returns any data to the caller.
     drop(conn);
-    drop(temporary);
+    temporary
+        .cleanup()
+        .map_err(|error| format!("historical temporary workspace could not be removed: {error}"))?;
     Ok(HistoricalSnapshot {
         graph,
         temporary_bytes,
@@ -477,27 +517,26 @@ pub fn run_diff(
                 let message = format!(
                     "Base revision {base:?} is unavailable locally ({error}). Fetch it before requesting historical deltas; shallow clones may need git fetch --deepen."
                 );
-                if json_mode {
-                    println!(
-                        "{}",
-                        serde_json::to_string_pretty(&json!({
-                            "contract_version": "0.3",
-                            "command": "diff",
-                            "ok": false,
-                            "data": {"base": Value::Null, "head": Value::Null, "files": [], "symbols": [], "edges": [], "newly_unresolved_callers": [], "unmapped_hunks": [], "historical_snapshot": Value::Null},
-                            "warnings": [{"code": "base_revision_unavailable", "message": message}],
-                            "truncated": false,
-                            "next_action": "provide a base revision"
-                        }))?
-                    );
-                    return Ok(());
-                }
-                return Err(message.into());
+                return structured_failure(
+                    json_mode,
+                    "base_revision_unavailable",
+                    message,
+                    "provide a base revision",
+                );
             }
         };
-        let head_out = head
-            .map(|revision| resolve_revision(workspace, revision))
-            .transpose()?;
+        let head_out = match head {
+            Some(revision) => match resolve_revision(workspace, revision) {
+                Ok(resolved) => Some(resolved),
+                Err(error) => return structured_failure(
+                    json_mode,
+                    "head_revision_unavailable",
+                    format!("Head revision {revision:?} is unavailable locally ({error}). Fetch it before requesting historical deltas; shallow clones may need git fetch --deepen."),
+                    "provide a head revision",
+                ),
+            },
+            None => None,
+        };
         let mut files = changed_files(workspace, base, head)?;
         let files_truncated = cap_changed_files(&mut files);
         (
@@ -522,18 +561,16 @@ pub fn run_diff(
         cap_changed_files(&mut files);
         (None, None, files, Vec::new(), false)
     };
-    let mut warnings = Vec::new();
     let current_graph = graph_snapshot(&conn)?;
     let target_history = if let Some(head_out) = head_out.as_deref() {
         match historical_snapshot(workspace, head_out) {
             Ok(snapshot) => Some(snapshot),
-            Err(error) => {
-                warnings.push(json!({
-                    "code": "historical_snapshot_unavailable",
-                    "message": format!("The requested --head snapshot is unavailable ({error}). Fetch the revision locally (for a shallow clone, git fetch --deepen) and retry.")
-                }));
-                None
-            }
+            Err(error) => return structured_failure(
+                json_mode,
+                "head_snapshot_unavailable",
+                format!("The requested --head snapshot is unavailable ({error}). Fetch the revision locally (for a shallow clone, git fetch --deepen) and retry."),
+                "provide a head revision",
+            ),
         }
     } else {
         None
@@ -543,11 +580,14 @@ pub fn run_diff(
         .map(|snapshot| snapshot.graph.clone())
         .unwrap_or_else(|| current_graph.clone());
     if base.is_some() && head.is_none() && !current_index_is_fresh(workspace, &conn)? {
-        warnings.push(json!({
-            "code": "current_index_stale",
-            "message": "The worktree-side index is stale, so historical deltas may not describe the current source. Run ochna sync and retry."
-        }));
+        return structured_failure(
+            json_mode,
+            "current_index_stale",
+            "The worktree-side index is stale, so historical deltas may not describe the current source. Run ochna sync and retry.".to_string(),
+            "ochna sync",
+        );
     }
+    let mut warnings = Vec::new();
     let retained_paths: BTreeSet<_> = files.iter().map(|file| file.path.as_str()).collect();
     hunks.retain(|hunk| retained_paths.contains(hunk.path.as_str()));
     let status_by_path: BTreeMap<_, _> = files
@@ -632,12 +672,14 @@ pub fn run_diff(
         None
     };
     let mut historical_metrics = Value::Null;
-    let unresolved = if let Some(historical) = historical.as_ref() {
+    let mut unresolved: Vec<Value> = if let Some(historical) = historical.as_ref() {
         historical_metrics = json!({
             "base_index": "temporary",
             "head_index": if target_history.is_some() { "temporary" } else { "current" },
-            "temporary_bytes": historical.temporary_bytes,
-            "elapsed_ms": historical.elapsed_ms,
+            "base": {"temporary_bytes": historical.temporary_bytes, "elapsed_ms": historical.elapsed_ms},
+            "head": target_history.as_ref().map(|snapshot| json!({"temporary_bytes": snapshot.temporary_bytes, "elapsed_ms": snapshot.elapsed_ms})),
+            "temporary_bytes": historical.temporary_bytes + target_history.as_ref().map_or(0, |snapshot| snapshot.temporary_bytes),
+            "elapsed_ms": historical.elapsed_ms + target_history.as_ref().map_or(0, |snapshot| snapshot.elapsed_ms),
             "cleanup": "removed"
         });
         for (id, node) in &target_graph.nodes {
@@ -680,6 +722,10 @@ pub fn run_diff(
     } else {
         unresolved_for_new_lines(&conn, &mapped.keys().cloned().collect(), &new_lines)?
     };
+    let unresolved_truncated = unresolved.len() > limit;
+    if unresolved_truncated {
+        unresolved.truncate(limit);
+    }
     if historical.is_none() && (!removed_hunks.is_empty() || deleted_explicit) {
         warnings.push(json!({"code":"historical_index_required", "message":"Removed symbols and edges require a historical index; unavailable endpoints are null."}));
         for hunk in removed_hunks {
@@ -715,7 +761,8 @@ pub fn run_diff(
                 right["relationship"].as_str().unwrap_or(""),
             ))
     });
-    let mut truncated = files_truncated || symbols.len() > limit || edges.len() > limit;
+    let mut truncated =
+        files_truncated || symbols.len() > limit || edges.len() > limit || unresolved_truncated;
     if symbols.len() > limit {
         symbols.truncate(limit);
     }

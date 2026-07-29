@@ -448,7 +448,10 @@ def main() -> int:
             run(["git", "add", "-A"], named_head)
             run(["git", "commit", "-m", "base"], named_head)
             base_sha = run(["git", "rev-parse", "HEAD"], named_head).stdout.strip()
-            (named_head / "src" / "lib.rs").write_text("fn head_only() {}\n", encoding="utf-8")
+            (named_head / "src" / "lib.rs").write_text(
+                "fn head_only() { missing_one(); missing_two(); }\n",
+                encoding="utf-8",
+            )
             run(["git", "add", "-A"], named_head)
             run(["git", "commit", "-m", "head"], named_head)
             head_sha = run(["git", "rev-parse", "HEAD"], named_head).stdout.strip()
@@ -461,6 +464,34 @@ def main() -> int:
             assert "src/lib.rs::head_only" in named_symbols
             assert "src/lib.rs::dirty_workspace_only" not in named_symbols
             assert named_diff["data"]["historical_snapshot"]["head_index"] == "temporary"
+            assert named_diff["data"]["historical_snapshot"]["base"] is not None
+            assert named_diff["data"]["historical_snapshot"]["head"] is not None
+            assert named_diff["data"]["historical_snapshot"]["temporary_bytes"] == (
+                named_diff["data"]["historical_snapshot"]["base"]["temporary_bytes"]
+                + named_diff["data"]["historical_snapshot"]["head"]["temporary_bytes"]
+            )
+            limited_named_diff = assert_json(run([
+                ochna, "diff", "--base", base_sha, "--head", head_sha,
+                "--limit", "1", "--json"
+            ], named_head).stdout)
+            assert len(limited_named_diff["data"]["newly_unresolved_callers"]) == 1
+            assert limited_named_diff["truncated"] is True
+            missing_head = run([
+                ochna, "diff", "--base", base_sha, "--head", "definitely-missing", "--json"
+            ], named_head, check=False)
+            assert missing_head.returncode != 0
+            missing_head_json = assert_json(missing_head.stdout)
+            assert missing_head_json["ok"] is False
+            assert missing_head_json["warnings"][0]["code"] == "head_revision_unavailable"
+            assert missing_head_json["data"]["symbols"] == []
+            (named_head / "src" / "lib.rs").write_text("fn stale() {}\n", encoding="utf-8")
+            stale_diff = run([ochna, "diff", "--base", head_sha, "--json"], named_head, check=False)
+            assert stale_diff.returncode != 0
+            stale_diff_json = assert_json(stale_diff.stdout)
+            assert stale_diff_json["ok"] is False
+            assert stale_diff_json["warnings"][0]["code"] == "current_index_stale"
+            assert stale_diff_json["next_action"] == "ochna sync"
+            assert stale_diff_json["data"]["symbols"] == []
         finally:
             shutil.rmtree(named_head, ignore_errors=True)
 
