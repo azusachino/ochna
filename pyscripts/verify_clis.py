@@ -292,14 +292,13 @@ def main() -> int:
             # --- impact: confidence-bounded reverse traversal preserves both
             # structural paths and stops at the unresolved frontier. ---
             impact = assert_json(run([
-                ochna, "impact", "render", "--direction", "callers", "--depth", "2",
-                "--min-confidence", "0", "--json"
+                ochna, "impact", "render", "--direction", "callers", "--depth", "2", "--json"
             ], review).stdout)
             assert impact["contract_version"] == "0.3"
             assert impact["command"] == "impact"
             assert impact["data"]["root"]["id"] == "src/lib.rs::render"
             assert impact["data"]["direction"] == "callers"
-            assert impact["data"]["min_confidence"] == 0
+            assert impact["data"]["min_confidence"] == 30
             assert {node["id"] for node in impact["data"]["nodes"]} >= {
                 "src/lib.rs::render_page", "tests/render_tests.rs::render_page_uses_render"
             }
@@ -314,8 +313,7 @@ def main() -> int:
             )
             assert any(edge["confidence"] < 80 for edge in impact["data"]["edges"])
             no_tests_impact = assert_json(run([
-                ochna, "--no-tests", "impact", "render", "--direction", "callers", "--depth", "2",
-                "--min-confidence", "0", "--json"
+                ochna, "--no-tests", "impact", "render", "--direction", "callers", "--depth", "2", "--json"
             ], review).stdout)
             assert no_tests_impact["data"]["affected_tests"] == []
             explicit = assert_json(run([ochna, "diff", "--files", "src/lib.rs", "tests/render_tests.rs", "--json"], review).stdout)

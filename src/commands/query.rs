@@ -544,50 +544,25 @@ fn impact_edge_key(edge: &ImpactEdge) -> String {
     )
 }
 
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn run_impact(
-    workspace: &Path,
-    symbol: &str,
+struct ImpactResult {
+    nodes: BTreeMap<String, db::Node>,
+    edges: BTreeMap<String, ImpactEdge>,
+    paths: Vec<ImpactPath>,
+    affected_tests: BTreeMap<String, AffectedTest>,
+    boundaries: Vec<UnresolvedBoundary>,
+    truncated: bool,
+    truncated_frontiers: Vec<String>,
+}
+
+fn collect_impact(
+    conn: &Connection,
+    root: &db::Node,
     depth: usize,
     direction: ImpactDirection,
     min_confidence: i64,
     limit: usize,
-    json: bool,
     no_tests: bool,
-) -> Result<(), Box<dyn Error>> {
-    let conn = open_db(workspace)?;
-    let resolution = resolve_one_node(&conn, symbol, None)?;
-    let Some(root) = resolution.target else {
-        let data = json!({
-            "root": serde_json::Value::Null,
-            "direction": format!("{:?}", direction).to_ascii_lowercase(),
-            "depth": depth,
-            "min_confidence": min_confidence,
-            "nodes": [], "edges": [], "paths": [], "affected_tests": [], "unresolved_boundaries": []
-        });
-        if json {
-            println!(
-                "{}",
-                serde_json::to_string_pretty(
-                    &json!({"contract_version":"0.3","command":"impact","ok":false,"data":data,"warnings":resolution.warnings,"truncated":false,"next_action":"narrow the query"})
-                )?
-            );
-        } else {
-            println!("Impact for {symbol}:");
-            println!("Nodes:\nnone\nPaths:\nnone\nAffected tests:\nnone\nUnresolved boundaries:\nnone\nEdges:\nnone");
-            if !resolution.warnings.is_empty() {
-                println!("Warnings:");
-                for warning in resolution.warnings {
-                    println!(
-                        "- {}",
-                        warning["message"].as_str().unwrap_or("unknown warning")
-                    );
-                }
-            }
-        }
-        return Ok(());
-    };
-
+) -> rusqlite::Result<ImpactResult> {
     let mut queue = VecDeque::from([TraversalState {
         node: root.clone(),
         node_ids: vec![root.id.clone()],
@@ -596,8 +571,6 @@ pub(crate) fn run_impact(
     }]);
     let mut nodes = BTreeMap::<String, db::Node>::new();
     let mut edges = BTreeMap::<String, ImpactEdge>::new();
-    // `root` is an emitted zero-edge path so unresolved boundaries at the
-    // selected symbol can always point to a concrete path ID.
     let mut paths = vec![ImpactPath {
         id: "root".to_string(),
         edges: Vec::new(),
@@ -609,7 +582,7 @@ pub(crate) fn run_impact(
     let mut truncated = false;
 
     while let Some(state) = queue.pop_front() {
-        let unresolved = impact_unresolved_for(&conn, &state.node, &state.path_id)?;
+        let unresolved = impact_unresolved_for(conn, &state.node, &state.path_id)?;
         if boundaries.len() + unresolved.len() > IMPACT_EDGE_LIMIT {
             truncated = true;
             truncated_frontiers.push(format!("{} (unresolved references)", state.node.id));
@@ -619,7 +592,7 @@ pub(crate) fn run_impact(
         if state.edges.len() >= depth {
             continue;
         }
-        for edge in impact_edges_from(&conn, &state.node.id, direction)? {
+        for edge in impact_edges_from(conn, &state.node.id, direction)? {
             if edge.confidence < min_confidence
                 || (no_tests && (edge.source.is_test || edge.target.is_test))
             {
@@ -678,6 +651,79 @@ pub(crate) fn run_impact(
             });
         }
     }
+    Ok(ImpactResult {
+        nodes,
+        edges,
+        paths,
+        affected_tests,
+        boundaries,
+        truncated,
+        truncated_frontiers,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn run_impact(
+    workspace: &Path,
+    symbol: &str,
+    depth: usize,
+    direction: ImpactDirection,
+    min_confidence: i64,
+    limit: usize,
+    json: bool,
+    no_tests: bool,
+) -> Result<(), Box<dyn Error>> {
+    let conn = open_db(workspace)?;
+    let resolution = resolve_one_node(&conn, symbol, None)?;
+    let Some(root) = resolution.target else {
+        let data = json!({
+            "root": serde_json::Value::Null,
+            "direction": format!("{:?}", direction).to_ascii_lowercase(),
+            "depth": depth,
+            "min_confidence": min_confidence,
+            "nodes": [], "edges": [], "paths": [], "affected_tests": [], "unresolved_boundaries": []
+        });
+        if json {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(
+                    &json!({"contract_version":"0.3","command":"impact","ok":false,"data":data,"warnings":resolution.warnings,"truncated":false,"next_action":"narrow the query"})
+                )?
+            );
+        } else {
+            println!("Impact for {symbol}:");
+            println!("Nodes:\nnone\nPaths:\nnone\nAffected tests:\nnone\nUnresolved boundaries:\nnone\nEdges:\nnone");
+            if !resolution.warnings.is_empty() {
+                println!("Warnings:");
+                for warning in resolution.warnings {
+                    println!(
+                        "- {}",
+                        warning["message"].as_str().unwrap_or("unknown warning")
+                    );
+                }
+            }
+        }
+        return Ok(());
+    };
+
+    let result = collect_impact(
+        &conn,
+        &root,
+        depth,
+        direction,
+        min_confidence,
+        limit,
+        no_tests,
+    )?;
+    let ImpactResult {
+        nodes,
+        edges,
+        paths,
+        affected_tests,
+        boundaries,
+        truncated,
+        truncated_frontiers,
+    } = result;
 
     let direction_name = match direction {
         ImpactDirection::Callers => "callers",
@@ -1524,6 +1570,156 @@ mod tests {
         assert!(impact_edges_from(&conn, &root.id, ImpactDirection::Callees)
             .unwrap()
             .is_empty());
+    }
+
+    #[test]
+    fn impact_preserves_converging_paths_terminates_cycles_and_reports_frontiers() {
+        let conn = Connection::open_in_memory().unwrap();
+        db::init_schema(&conn).unwrap();
+        let root = node("root", false);
+        let left = node("left", false);
+        let right = node("right", false);
+        let test = node("test", true);
+        let cycle = node("cycle", false);
+        for node in [&root, &left, &right, &test, &cycle] {
+            db::upsert_node(&conn, node).unwrap();
+        }
+        for (source, target) in [
+            (&left, &root),
+            (&right, &root),
+            (&test, &root),
+            (&test, &left),
+            (&test, &right),
+            (&root, &cycle),
+            (&cycle, &root),
+        ] {
+            db::upsert_edge(
+                &conn,
+                &db::Edge {
+                    source_id: source.id.clone(),
+                    target_id: target.id.clone(),
+                    kind: "calls".to_string(),
+                    resolution_kind: 5,
+                },
+            )
+            .unwrap();
+        }
+        db::insert_unresolved_ref(
+            &conn,
+            &db::UnresolvedRef {
+                id: None,
+                source_id: left.id.clone(),
+                specifier: "missing".to_string(),
+                kind: "call".to_string(),
+                line: 1,
+                column: 1,
+            },
+        )
+        .unwrap();
+
+        let first = collect_impact(&conn, &root, 5, ImpactDirection::Both, 0, 50, false).unwrap();
+        let second = collect_impact(&conn, &root, 5, ImpactDirection::Both, 0, 50, false).unwrap();
+        let test_paths = &first.affected_tests["test"].path_ids;
+        assert_eq!(
+            test_paths.len(),
+            3,
+            "direct and both converging paths reach the test"
+        );
+        let emitted_ids = first
+            .paths
+            .iter()
+            .map(|path| path.id.as_str())
+            .collect::<Vec<_>>();
+        assert!(test_paths
+            .iter()
+            .all(|id| emitted_ids.contains(&id.as_str())));
+        let test_path_lengths = first
+            .paths
+            .iter()
+            .filter(|path| test_paths.contains(&path.id))
+            .map(|path| path.edges.len())
+            .collect::<Vec<_>>();
+        assert!(
+            test_path_lengths.contains(&1),
+            "the direct path is retained"
+        );
+        assert_eq!(
+            test_path_lengths.iter().filter(|&&len| len == 2).count(),
+            2,
+            "both converging paths are retained"
+        );
+        assert!(!first.boundaries.is_empty());
+        assert!(first
+            .boundaries
+            .iter()
+            .all(|boundary| emitted_ids.contains(&boundary.path_id.as_str())));
+        for path in &first.paths {
+            let mut current = root.id.clone();
+            let mut visited = std::collections::BTreeSet::from([current.clone()]);
+            for edge in &path.edges {
+                current = if edge.source.id == current {
+                    edge.target.id.clone()
+                } else if edge.target.id == current {
+                    edge.source.id.clone()
+                } else {
+                    panic!("path {} contains a non-contiguous edge", path.id);
+                };
+                assert!(
+                    visited.insert(current.clone()),
+                    "path {} repeats node {current}",
+                    path.id
+                );
+            }
+        }
+        assert_eq!(
+            first
+                .paths
+                .iter()
+                .map(|path| {
+                    (
+                        path.id.as_str(),
+                        path.edges
+                            .iter()
+                            .map(|edge| {
+                                (
+                                    edge.source.id.as_str(),
+                                    edge.target.id.as_str(),
+                                    edge.relationship.as_str(),
+                                )
+                            })
+                            .collect::<Vec<_>>(),
+                    )
+                })
+                .collect::<Vec<_>>(),
+            second
+                .paths
+                .iter()
+                .map(|path| {
+                    (
+                        path.id.as_str(),
+                        path.edges
+                            .iter()
+                            .map(|edge| {
+                                (
+                                    edge.source.id.as_str(),
+                                    edge.target.id.as_str(),
+                                    edge.relationship.as_str(),
+                                )
+                            })
+                            .collect::<Vec<_>>(),
+                    )
+                })
+                .collect::<Vec<_>>(),
+            "path IDs and ordered edge sequences are deterministic across identical runs"
+        );
+
+        let limited =
+            collect_impact(&conn, &root, 2, ImpactDirection::Callers, 0, 1, false).unwrap();
+        assert!(limited.truncated);
+        assert!(limited
+            .truncated_frontiers
+            .iter()
+            .any(|frontier| frontier.contains("node limit")));
     }
 
     #[test]

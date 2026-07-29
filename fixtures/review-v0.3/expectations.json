@@ -49,6 +49,7 @@
   },
   "impact": {
     "root": "src/lib.rs::render",
+    "min_confidence": 30,
     "direction": "callers",
     "contains": [
       "src/lib.rs::render_page",

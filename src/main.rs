@@ -147,8 +147,8 @@ enum Commands {
         /// Traverse incoming callers, outgoing callees, or both
         #[arg(long, value_enum, default_value_t = ImpactDirection::Both)]
         direction: ImpactDirection,
-        /// Only traverse relationships at or above this confidence (default 80)
-        #[arg(long, default_value_t = 80, value_parser = parse_confidence)]
+        /// Only traverse relationships at or above this confidence (default 30)
+        #[arg(long, default_value_t = 30, value_parser = parse_confidence)]
         min_confidence: i64,
         /// Maximum reported nodes (default 50, maximum 200)
         #[arg(long, default_value_t = 50, value_parser = parse_impact_limit)]
@@ -490,7 +490,7 @@ mod tests {
             } => {
                 assert_eq!(depth, 2);
                 assert!(matches!(direction, ImpactDirection::Both));
-                assert_eq!(min_confidence, 80);
+                assert_eq!(min_confidence, 30);
                 assert_eq!(limit, 50);
             }
             _ => panic!("expected impact command"),
