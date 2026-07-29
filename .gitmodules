@@ -1,14 +1,17 @@
 [submodule "clones/tokio"]
 	path = clones/tokio
 	url = https://github.com/tokio-rs/tokio.git
+	shallow = true
 	ignore = dirty
 [submodule "clones/netty"]
 	path = clones/netty
 	url = https://github.com/netty/netty.git
+	shallow = true
 	ignore = dirty
 [submodule "clones/kubernetes"]
 	path = clones/kubernetes
 	url = https://github.com/kubernetes/kubernetes.git
+	shallow = true
 	ignore = dirty
 [submodule "clones/linux"]
 	path = clones/linux

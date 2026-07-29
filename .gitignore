@@ -3,6 +3,9 @@
 /Cargo.lock
 /.uv-cache
 
+# Python
+__pycache__/
+
 # ochna
 /.ochna
 

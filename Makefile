@@ -41,7 +41,7 @@ check: fmt lint
 validate: check verify-clis
 
 verify-clis: build
-	UV_CACHE_DIR=.uv-cache uv run python pyscripts/verify_clis.py
+	UV_CACHE_DIR=.uv-cache uv run python scripts/verify_clis.py
 
 verify_clis: verify-clis
 
@@ -61,7 +61,7 @@ install:
 # quality gate: counts are stable per pinned submodule commit, so a parser
 # regression shows up as a count delta. Use REINDEX=1 to force a clean re-index.
 report: build
-	./scripts/report.sh
+	uv run python scripts/benchmark_report.py
 
 clean:
 	cargo clean

@@ -14,12 +14,11 @@ exclude = [
     "/java_mock_test",
     "/.ochna",
     "/.github",
-    "/benches",
     "/flake.lock",
     "/flake.nix",
     "/Makefile",
     "/pyproject.toml",
-    "/pyscripts",
+    "/scripts/*.py",
     "/.python-version",
     "/uv.lock",
 ]

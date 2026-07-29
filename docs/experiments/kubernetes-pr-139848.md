@@ -72,7 +72,7 @@ The adjusted workflow is:
 The helper script captures the adjusted workflow:
 
 ```bash
-uv run python pyscripts/pr_feature_report.py \
+uv run python scripts/pr_feature_report.py \
   --workspace clones/kubernetes \
   --repo kubernetes/kubernetes \
   --pr 139848
