@@ -5,6 +5,13 @@
 
 .PHONY: help all build test fmt fmt-fix lint check validate verify-clis verify_clis setup install report case-sim clean
 
+# `make` runs each recipe line in its own fresh, non-interactive shell, which
+# never sources shell rc files -- so a `mise activate` in .zshrc/.bashrc does
+# not carry into Make at all, regardless of the invoking shell. `mise x --`
+# resolves the .mise.toml-pinned tool directly per invocation instead of
+# depending on shell activation having happened.
+MISE := mise x --
+
 help:
 	@echo "Usage: make <target>"
 	@echo ""
@@ -22,19 +29,19 @@ help:
 all: build
 
 build:
-	cargo build --release
+	$(MISE) cargo build --release
 
 test:
-	cargo test
+	$(MISE) cargo test
 
 fmt:
-	cargo fmt --all -- --check
+	$(MISE) cargo fmt --all -- --check
 
 fmt-fix:
-	cargo fmt --all
+	$(MISE) cargo fmt --all
 
 lint:
-	cargo clippy --all-targets -- -D warnings
+	$(MISE) cargo clippy --all-targets -- -D warnings
 
 check: fmt lint
 
@@ -42,33 +49,35 @@ check: fmt lint
 validate: check verify-clis
 
 verify-clis: build
-	UV_CACHE_DIR=.uv-cache uv run python scripts/verify_clis.py
+	UV_CACHE_DIR=.uv-cache $(MISE) uv run python scripts/verify_clis.py
 
 verify_clis: verify-clis
 
 setup:
 	@echo "Initializing Git submodules..."
 	git submodule update --init --recursive --depth 1
+	@echo "Installing mise-managed toolchain (rust, uv)..."
+	mise install
 	@echo "Initializing python virtual environment via uv..."
-	uv venv --python 3.14
+	$(MISE) uv venv --python 3.14
 	@echo "Building ochna binary..."
-	cargo build --release
+	$(MISE) cargo build --release
 	@echo "Done. Run 'make report' to index the test giants and emit BENCHMARK.md."
 
 install:
-	cargo install --path . --root $(HOME)/.cargo
+	$(MISE) cargo install --path . --root $(HOME)/.cargo
 
 # Index every checked-out test giant and write BENCHMARK.md. Reproducible
 # quality gate: counts are stable per pinned submodule commit, so a parser
 # regression shows up as a count delta. Use REINDEX=1 to force a clean re-index.
 report: build
-	uv run python scripts/benchmark_report.py
+	$(MISE) uv run python scripts/benchmark_report.py
 
 # Determined-state (ochna's output) vs actual-state (documented ground truth
 # from real historical PRs) checks against the test giants. Catches parser/
 # resolution regressions that synthetic fixtures wouldn't.
 case-sim: build
-	uv run python scripts/case_simulation.py
+	$(MISE) uv run python scripts/case_simulation.py
 
 clean:
-	cargo clean
+	$(MISE) cargo clean

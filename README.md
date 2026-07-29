@@ -73,6 +73,9 @@ ochna howto --json   # machine-readable capability descriptor
 
 ## 🧰 Development
 
+Toolchain (rust, uv) is pinned in `.mise.toml`; `mise install` provisions it,
+or run `make setup` to do that plus init submodules and build.
+
 Run the agent-facing CLI smoke tests against a release build (drives the real
 binary and asserts behavior, not just exit codes):
 ```bash

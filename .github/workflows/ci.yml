@@ -14,19 +14,17 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy
+      # Reads .mise.toml (rust = "stable"), the same file `make check`/`make
+      # test` resolve against locally via `mise x --`, so CI and local dev
+      # can't drift onto different toolchain versions.
+      - name: Install mise-managed toolchain (rust)
+        uses: jdx/mise-action@v2
 
       - name: Cache dependencies
         uses: swatinem/rust-cache@v2
 
-      - name: Check formatting
-        run: cargo fmt --all -- --check
-
-      - name: Run clippy lints
-        run: cargo clippy --all-targets -- -D warnings
+      - name: Check formatting and lint
+        run: make check
 
       - name: Run tests
-        run: cargo test
+        run: make test
