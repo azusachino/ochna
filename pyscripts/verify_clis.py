@@ -289,6 +289,35 @@ def main() -> int:
                 "source": "src/lib.rs::render_page", "specifier": "missing_renderer", "reason": "missing_target"
             }]
             assert {row["path"] for row in diff["data"]["unmapped_hunks"]} == {"README.md"}
+            # --- impact: confidence-bounded reverse traversal preserves both
+            # structural paths and stops at the unresolved frontier. ---
+            impact = assert_json(run([
+                ochna, "impact", "render", "--direction", "callers", "--depth", "2",
+                "--min-confidence", "0", "--json"
+            ], review).stdout)
+            assert impact["contract_version"] == "0.3"
+            assert impact["command"] == "impact"
+            assert impact["data"]["root"]["id"] == "src/lib.rs::render"
+            assert impact["data"]["direction"] == "callers"
+            assert impact["data"]["min_confidence"] == 0
+            assert {node["id"] for node in impact["data"]["nodes"]} >= {
+                "src/lib.rs::render_page", "tests/render_tests.rs::render_page_uses_render"
+            }
+            assert len(impact["data"]["paths"]) >= 2
+            assert len(impact["data"]["affected_tests"]) == 1
+            assert impact["data"]["affected_tests"][0]["test"]["id"] == "tests/render_tests.rs::render_page_uses_render"
+            assert any(
+                row["source"]["id"] == "src/lib.rs::render_page"
+                and row["specifier"] == "missing_renderer"
+                and row["reason"] == "missing_target"
+                for row in impact["data"]["unresolved_boundaries"]
+            )
+            assert any(edge["confidence"] < 80 for edge in impact["data"]["edges"])
+            no_tests_impact = assert_json(run([
+                ochna, "--no-tests", "impact", "render", "--direction", "callers", "--depth", "2",
+                "--min-confidence", "0", "--json"
+            ], review).stdout)
+            assert no_tests_impact["data"]["affected_tests"] == []
             explicit = assert_json(run([ochna, "diff", "--files", "src/lib.rs", "tests/render_tests.rs", "--json"], review).stdout)
             assert explicit["data"]["base"] is None and explicit["data"]["head"] is None
             assert {row["path"] for row in explicit["data"]["files"]} == {"src/lib.rs", "tests/render_tests.rs"}

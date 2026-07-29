@@ -1,10 +1,11 @@
 //! Query commands: `search`, `callers`, `node`, and `explore`, plus the shared
 //! node-lookup and emission helpers they build on.
 
-use crate::db;
+use crate::{db, ImpactDirection};
 use rusqlite::Connection;
 use serde::Serialize;
 use serde_json::json;
+use std::collections::{BTreeMap, VecDeque};
 use std::error::Error;
 use std::fs;
 use std::path::Path;
@@ -373,6 +374,394 @@ pub fn run_tests_for(
         }
         if truncated {
             println!("Warnings:\n- result limit reached; narrow the query");
+        }
+    }
+    Ok(())
+}
+
+const IMPACT_EDGE_LIMIT: usize = 400;
+
+#[derive(Clone, Serialize)]
+struct ImpactEdge {
+    relationship: String,
+    source: db::Node,
+    target: db::Node,
+    resolution_kind: String,
+    confidence: i64,
+}
+
+#[derive(Serialize)]
+struct ImpactPath {
+    id: String,
+    edges: Vec<ImpactEdge>,
+}
+
+#[derive(Serialize)]
+struct AffectedTest {
+    test: db::Node,
+    path_ids: Vec<String>,
+}
+
+#[derive(Serialize)]
+struct UnresolvedBoundary {
+    source: db::Node,
+    specifier: String,
+    reason: String,
+    path_id: String,
+}
+
+struct TraversalState {
+    node: db::Node,
+    node_ids: Vec<String>,
+    edges: Vec<ImpactEdge>,
+    path_id: String,
+}
+
+fn map_node_at(row: &rusqlite::Row, start: usize) -> rusqlite::Result<db::Node> {
+    Ok(db::Node {
+        id: row.get(start)?,
+        name: row.get(start + 1)?,
+        kind: row.get(start + 2)?,
+        qualified_name: row.get(start + 3)?,
+        file_path: row.get(start + 4)?,
+        start_line: row.get(start + 5)?,
+        end_line: row.get(start + 6)?,
+        start_column: row.get(start + 7)?,
+        end_column: row.get(start + 8)?,
+        signature: row.get(start + 9)?,
+        doc_comment: row.get(start + 10)?,
+        is_test: row.get(start + 11)?,
+        resolution_kind: None,
+        confidence: None,
+    })
+}
+
+fn impact_edges_from(
+    conn: &Connection,
+    node_id: &str,
+    direction: ImpactDirection,
+) -> rusqlite::Result<Vec<ImpactEdge>> {
+    let mut directions = Vec::new();
+    if matches!(direction, ImpactDirection::Callees | ImpactDirection::Both) {
+        directions.push((
+            "e.source_nid = (SELECT nid FROM nodes WHERE id = ?1)",
+            "outgoing",
+        ));
+    }
+    if matches!(direction, ImpactDirection::Callers | ImpactDirection::Both) {
+        directions.push((
+            "e.target_nid = (SELECT nid FROM nodes WHERE id = ?1)",
+            "incoming",
+        ));
+    }
+
+    let mut result = Vec::new();
+    for (filter, _) in directions {
+        let sql = format!(
+            "SELECT e.kind, e.resolution_kind, \
+                    s.id, s.name, s.kind, s.qualified_name, s.file_path, s.start_line, s.end_line, s.start_column, s.end_column, s.signature, s.doc_comment, s.is_test, \
+                    t.id, t.name, t.kind, t.qualified_name, t.file_path, t.start_line, t.end_line, t.start_column, t.end_column, t.signature, t.doc_comment, t.is_test \
+             FROM edges e JOIN nodes s ON s.nid = e.source_nid JOIN nodes t ON t.nid = e.target_nid \
+             WHERE {filter}"
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map([node_id], |row| {
+            let resolution: i64 = row.get(1)?;
+            Ok(ImpactEdge {
+                relationship: match row.get::<_, String>(0)?.as_str() {
+                    "calls" => "calls".to_string(),
+                    "tests" => "tests".to_string(),
+                    "contains" => "contains".to_string(),
+                    other => other.to_string(),
+                },
+                source: map_node_at(row, 2)?,
+                target: map_node_at(row, 14)?,
+                resolution_kind: db::label_for_kind(resolution).to_string(),
+                confidence: db::confidence_for_kind(resolution),
+            })
+        })?;
+        result.extend(rows.collect::<rusqlite::Result<Vec<_>>>()?);
+    }
+    result.sort_by(|left, right| {
+        left.source
+            .id
+            .cmp(&right.source.id)
+            .then_with(|| left.target.id.cmp(&right.target.id))
+            .then_with(|| left.relationship.cmp(&right.relationship))
+            .then_with(|| left.resolution_kind.cmp(&right.resolution_kind))
+    });
+    result.dedup_by(|left, right| {
+        left.source.id == right.source.id
+            && left.target.id == right.target.id
+            && left.relationship == right.relationship
+    });
+    Ok(result)
+}
+
+fn impact_unresolved_for(
+    conn: &Connection,
+    source: &db::Node,
+    path_id: &str,
+) -> rusqlite::Result<Vec<UnresolvedBoundary>> {
+    let mut stmt = conn.prepare(
+        "SELECT specifier, kind FROM unresolved_refs \
+         WHERE source_nid = (SELECT nid FROM nodes WHERE id = ?1) \
+         ORDER BY line, column, specifier",
+    )?;
+    let rows = stmt.query_map([&source.id], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+    })?;
+    let mut boundaries = Vec::new();
+    for row in rows {
+        let (specifier, kind) = row?;
+        let simple = specifier.rsplit("::").next().unwrap_or(&specifier);
+        let candidates: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM nodes WHERE name = ?1",
+            [simple],
+            |row| row.get(0),
+        )?;
+        let reason = if matches!(kind.as_str(), "macro_or_function" | "indirect_call") {
+            kind
+        } else if candidates > 0 {
+            "ambiguous_target".to_string()
+        } else {
+            "missing_target".to_string()
+        };
+        boundaries.push(UnresolvedBoundary {
+            source: source.clone(),
+            specifier,
+            reason,
+            path_id: path_id.to_string(),
+        });
+    }
+    Ok(boundaries)
+}
+
+fn impact_edge_key(edge: &ImpactEdge) -> String {
+    format!(
+        "{}\u{1f}{}\u{1f}{}",
+        edge.source.id, edge.target.id, edge.relationship
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn run_impact(
+    workspace: &Path,
+    symbol: &str,
+    depth: usize,
+    direction: ImpactDirection,
+    min_confidence: i64,
+    limit: usize,
+    json: bool,
+    no_tests: bool,
+) -> Result<(), Box<dyn Error>> {
+    let conn = open_db(workspace)?;
+    let resolution = resolve_one_node(&conn, symbol, None)?;
+    let Some(root) = resolution.target else {
+        let data = json!({
+            "root": serde_json::Value::Null,
+            "direction": format!("{:?}", direction).to_ascii_lowercase(),
+            "depth": depth,
+            "min_confidence": min_confidence,
+            "nodes": [], "edges": [], "paths": [], "affected_tests": [], "unresolved_boundaries": []
+        });
+        if json {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(
+                    &json!({"contract_version":"0.3","command":"impact","ok":false,"data":data,"warnings":resolution.warnings,"truncated":false,"next_action":"narrow the query"})
+                )?
+            );
+        } else {
+            println!("Impact for {symbol}:");
+            println!("Nodes:\nnone\nPaths:\nnone\nAffected tests:\nnone\nUnresolved boundaries:\nnone\nEdges:\nnone");
+            if !resolution.warnings.is_empty() {
+                println!("Warnings:");
+                for warning in resolution.warnings {
+                    println!(
+                        "- {}",
+                        warning["message"].as_str().unwrap_or("unknown warning")
+                    );
+                }
+            }
+        }
+        return Ok(());
+    };
+
+    let mut queue = VecDeque::from([TraversalState {
+        node: root.clone(),
+        node_ids: vec![root.id.clone()],
+        edges: Vec::new(),
+        path_id: "root".to_string(),
+    }]);
+    let mut nodes = BTreeMap::<String, db::Node>::new();
+    let mut edges = BTreeMap::<String, ImpactEdge>::new();
+    // `root` is an emitted zero-edge path so unresolved boundaries at the
+    // selected symbol can always point to a concrete path ID.
+    let mut paths = vec![ImpactPath {
+        id: "root".to_string(),
+        edges: Vec::new(),
+    }];
+    let mut next_path_number = 1usize;
+    let mut affected_tests = BTreeMap::<String, AffectedTest>::new();
+    let mut boundaries = Vec::<UnresolvedBoundary>::new();
+    let mut truncated_frontiers = Vec::<String>::new();
+    let mut truncated = false;
+
+    while let Some(state) = queue.pop_front() {
+        let unresolved = impact_unresolved_for(&conn, &state.node, &state.path_id)?;
+        if boundaries.len() + unresolved.len() > IMPACT_EDGE_LIMIT {
+            truncated = true;
+            truncated_frontiers.push(format!("{} (unresolved references)", state.node.id));
+        } else {
+            boundaries.extend(unresolved);
+        }
+        if state.edges.len() >= depth {
+            continue;
+        }
+        for edge in impact_edges_from(&conn, &state.node.id, direction)? {
+            if edge.confidence < min_confidence
+                || (no_tests && (edge.source.is_test || edge.target.is_test))
+            {
+                continue;
+            }
+            let next = if edge.source.id == state.node.id {
+                edge.target.clone()
+            } else {
+                edge.source.clone()
+            };
+            if state.node_ids.iter().any(|id| id == &next.id) {
+                continue;
+            }
+            let edge_key = impact_edge_key(&edge);
+            if !edges.contains_key(&edge_key) && edges.len() == IMPACT_EDGE_LIMIT {
+                truncated = true;
+                truncated_frontiers.push(format!("{} -> {} (edge limit)", state.node.id, next.id));
+                continue;
+            }
+            if !nodes.contains_key(&next.id) && nodes.len() == limit {
+                truncated = true;
+                truncated_frontiers.push(format!("{} -> {} (node limit)", state.node.id, next.id));
+                continue;
+            }
+            if paths.len() == IMPACT_EDGE_LIMIT {
+                truncated = true;
+                truncated_frontiers.push(format!("{} -> {} (path limit)", state.node.id, next.id));
+                continue;
+            }
+            let mut next_edges = state.edges.clone();
+            next_edges.push(edge.clone());
+            edges.entry(edge_key).or_insert(edge);
+            nodes.entry(next.id.clone()).or_insert_with(|| next.clone());
+            let next_path_id = format!("p{next_path_number}");
+            next_path_number += 1;
+            paths.push(ImpactPath {
+                id: next_path_id.clone(),
+                edges: next_edges.clone(),
+            });
+            if next.is_test {
+                affected_tests
+                    .entry(next.id.clone())
+                    .and_modify(|item| item.path_ids.push(next_path_id.clone()))
+                    .or_insert(AffectedTest {
+                        test: next.clone(),
+                        path_ids: vec![next_path_id.clone()],
+                    });
+            }
+            let mut next_node_ids = state.node_ids.clone();
+            next_node_ids.push(next.id.clone());
+            queue.push_back(TraversalState {
+                node: next,
+                node_ids: next_node_ids,
+                edges: next_edges,
+                path_id: next_path_id,
+            });
+        }
+    }
+
+    let direction_name = match direction {
+        ImpactDirection::Callers => "callers",
+        ImpactDirection::Callees => "callees",
+        ImpactDirection::Both => "both",
+    };
+    let warning_values = if truncated {
+        vec![
+            json!({"code":"truncated","message":format!("result budget reached; frontier not walked: {}", truncated_frontiers.first().map(String::as_str).unwrap_or("unknown"))}),
+        ]
+    } else {
+        Vec::new()
+    };
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&json!({
+                "contract_version":"0.3", "command":"impact", "ok":true,
+                "data":{"root":root,"direction":direction_name,"depth":depth,"min_confidence":min_confidence,"nodes":nodes.into_values().collect::<Vec<_>>(),"edges":edges.into_values().collect::<Vec<_>>(),"paths":paths,"affected_tests":affected_tests.into_values().collect::<Vec<_>>(),"unresolved_boundaries":boundaries},
+                "warnings":warning_values, "truncated":truncated, "next_action":if truncated {"narrow the query"} else {"none"}
+            }))?
+        );
+    } else {
+        println!("Impact for {symbol}:");
+        println!("Nodes:");
+        for node in nodes.values() {
+            println!("- {}", node.qualified_name.as_deref().unwrap_or(&node.id));
+        }
+        if nodes.is_empty() {
+            println!("none");
+        }
+        println!("Paths:");
+        for path in &paths {
+            println!(
+                "- {}: {}",
+                path.id,
+                path.edges
+                    .iter()
+                    .map(|edge| format!(
+                        "{} -> {} [{}]",
+                        edge.source.id, edge.target.id, edge.confidence
+                    ))
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            );
+        }
+        if paths.is_empty() {
+            println!("none");
+        }
+        println!("Affected tests:");
+        for item in affected_tests.values() {
+            println!("- {} ({})", item.test.id, item.path_ids.join(", "));
+        }
+        if affected_tests.is_empty() {
+            println!("none");
+        }
+        println!("Unresolved boundaries:");
+        for boundary in &boundaries {
+            println!(
+                "- {} -> {} ({}, {})",
+                boundary.source.id, boundary.specifier, boundary.reason, boundary.path_id
+            );
+        }
+        if boundaries.is_empty() {
+            println!("none");
+        }
+        println!("Edges:");
+        for edge in edges.values() {
+            println!(
+                "- {} -> {} [{}; {}]",
+                edge.source.id, edge.target.id, edge.resolution_kind, edge.confidence
+            );
+        }
+        if edges.is_empty() {
+            println!("none");
+        }
+        if truncated {
+            println!(
+                "Warnings:\n- result budget reached; frontier not walked: {}",
+                truncated_frontiers
+                    .first()
+                    .map(String::as_str)
+                    .unwrap_or("unknown")
+            );
         }
     }
     Ok(())
@@ -1092,6 +1481,49 @@ mod tests {
         retain_non_tests(&mut nodes, true);
         assert_eq!(nodes.len(), 1);
         assert_eq!(nodes[0].id, "prod");
+    }
+
+    #[test]
+    fn impact_uses_indexed_edge_metadata_and_direction_without_name_guessing() {
+        let conn = Connection::open_in_memory().unwrap();
+        db::init_schema(&conn).unwrap();
+        let root = node("src/lib.rs::render", false);
+        let caller = node("src/lib.rs::render_page", false);
+        let test = node("tests/render_tests.rs::render_page_uses_render", true);
+        let unrelated = node("src/other.rs::render", false);
+        for node in [&root, &caller, &test, &unrelated] {
+            db::upsert_node(&conn, node).unwrap();
+        }
+        db::upsert_edge(
+            &conn,
+            &db::Edge {
+                source_id: caller.id.clone(),
+                target_id: root.id.clone(),
+                kind: "calls".to_string(),
+                resolution_kind: 4,
+            },
+        )
+        .unwrap();
+        db::upsert_edge(
+            &conn,
+            &db::Edge {
+                source_id: test.id.clone(),
+                target_id: caller.id.clone(),
+                kind: "calls".to_string(),
+                resolution_kind: 5,
+            },
+        )
+        .unwrap();
+
+        let incoming = impact_edges_from(&conn, &root.id, ImpactDirection::Callers).unwrap();
+        assert_eq!(incoming.len(), 1);
+        assert_eq!(incoming[0].source.id, caller.id);
+        assert_eq!(incoming[0].target.id, root.id);
+        assert_eq!(incoming[0].resolution_kind, "receiver_type");
+        assert_eq!(incoming[0].confidence, 90);
+        assert!(impact_edges_from(&conn, &root.id, ImpactDirection::Callees)
+            .unwrap()
+            .is_empty());
     }
 
     #[test]

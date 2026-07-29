@@ -2,7 +2,7 @@ pub mod commands;
 pub mod db;
 pub mod parser;
 
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use std::error::Error;
 use std::path::PathBuf;
 
@@ -37,6 +37,46 @@ fn parse_diff_limit(value: &str) -> Result<usize, String> {
     } else {
         Err("limit must be between 1 and 500".to_string())
     }
+}
+
+fn parse_impact_limit(value: &str) -> Result<usize, String> {
+    let limit = value
+        .parse::<usize>()
+        .map_err(|_| "limit must be a positive integer".to_string())?;
+    if (1..=200).contains(&limit) {
+        Ok(limit)
+    } else {
+        Err("limit must be between 1 and 200".to_string())
+    }
+}
+
+fn parse_impact_depth(value: &str) -> Result<usize, String> {
+    let depth = value
+        .parse::<usize>()
+        .map_err(|_| "depth must be a positive integer".to_string())?;
+    if (1..=5).contains(&depth) {
+        Ok(depth)
+    } else {
+        Err("depth must be between 1 and 5".to_string())
+    }
+}
+
+fn parse_confidence(value: &str) -> Result<i64, String> {
+    let confidence = value
+        .parse::<i64>()
+        .map_err(|_| "min-confidence must be an integer".to_string())?;
+    if (0..=100).contains(&confidence) {
+        Ok(confidence)
+    } else {
+        Err("min-confidence must be between 0 and 100".to_string())
+    }
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+pub(crate) enum ImpactDirection {
+    Callers,
+    Callees,
+    Both,
 }
 
 #[derive(Parser, Debug)]
@@ -95,6 +135,23 @@ enum Commands {
         in_path: Option<String>,
         /// Maximum test relationships to return (default 30, maximum 100)
         #[arg(long, default_value_t = 30, value_parser = parse_tests_for_limit)]
+        limit: usize,
+    },
+    /// Traverse bounded, confidence-labelled structural impact from one symbol
+    Impact {
+        /// The ID or qualified name of exactly one indexed symbol
+        symbol: String,
+        /// Maximum traversal depth (default 2, maximum 5)
+        #[arg(long, default_value_t = 2, value_parser = parse_impact_depth)]
+        depth: usize,
+        /// Traverse incoming callers, outgoing callees, or both
+        #[arg(long, value_enum, default_value_t = ImpactDirection::Both)]
+        direction: ImpactDirection,
+        /// Only traverse relationships at or above this confidence (default 80)
+        #[arg(long, default_value_t = 80, value_parser = parse_confidence)]
+        min_confidence: i64,
+        /// Maximum reported nodes (default 50, maximum 200)
+        #[arg(long, default_value_t = 50, value_parser = parse_impact_limit)]
         limit: usize,
     },
     /// Map a Git change or explicit paths onto current indexed symbols
@@ -242,6 +299,24 @@ fn main() -> Result<(), Box<dyn Error>> {
                 &current_dir,
                 &symbol,
                 in_path.as_deref(),
+                limit,
+                json,
+                no_tests,
+            )?;
+        }
+        Commands::Impact {
+            symbol,
+            depth,
+            direction,
+            min_confidence,
+            limit,
+        } => {
+            commands::run_impact(
+                &current_dir,
+                &symbol,
+                depth,
+                direction,
+                min_confidence,
                 limit,
                 json,
                 no_tests,
@@ -398,6 +473,32 @@ mod tests {
         );
         assert!(
             Cli::try_parse_from(["ochna", "diff", "--base", "HEAD", "--limit", "501"]).is_err()
+        );
+    }
+
+    #[test]
+    fn impact_parses_contract_defaults_and_bounds() {
+        let cli = Cli::try_parse_from(["ochna", "impact", "render"])
+            .expect("impact defaults should parse");
+        match cli.command {
+            Commands::Impact {
+                depth,
+                direction,
+                min_confidence,
+                limit,
+                ..
+            } => {
+                assert_eq!(depth, 2);
+                assert!(matches!(direction, ImpactDirection::Both));
+                assert_eq!(min_confidence, 80);
+                assert_eq!(limit, 50);
+            }
+            _ => panic!("expected impact command"),
+        }
+        assert!(Cli::try_parse_from(["ochna", "impact", "render", "--depth", "6"]).is_err());
+        assert!(Cli::try_parse_from(["ochna", "impact", "render", "--limit", "201"]).is_err());
+        assert!(
+            Cli::try_parse_from(["ochna", "impact", "render", "--min-confidence", "101"]).is_err()
         );
     }
 }

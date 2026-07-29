@@ -11,6 +11,7 @@ mod status;
 pub use diff::run_diff;
 pub(crate) use index::discover_source_files;
 pub use index::run_init;
+pub(crate) use query::run_impact;
 pub use query::{
     run_callees, run_callers, run_explore, run_howto, run_node, run_search, run_tests_for,
 };
