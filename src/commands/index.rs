@@ -66,14 +66,20 @@ pub(crate) fn discover_source_files(workspace: &Path) -> std::io::Result<Vec<Pat
     Ok(files)
 }
 
-fn should_skip_dir(file_name: &str, include_library: bool) -> bool {
+pub(crate) fn should_skip_dir(file_name: &str, include_library: bool) -> bool {
     if file_name == ".git" || file_name == ".ochna" {
         return true;
     }
     if !include_library
         && matches!(
             file_name,
-            "target" | "node_modules" | ".venv" | "vendor" | "build" | "dist"
+            // "clones" is this project's own convention (real-world test-giant
+            // submodules, see AGENTS.md), not a generic pattern -- but it's an
+            // unusual enough name for real source that the false-positive risk
+            // mirrors "vendor"/"build"/"dist" below, and skipping it is what
+            // makes `ochna init` safe to run at this repo's own root instead of
+            // requiring every caller to know to `cd` into a specific giant.
+            "clones" | "target" | "node_modules" | ".venv" | "vendor" | "build" | "dist"
         )
     {
         return true;

@@ -6,7 +6,6 @@ use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
 use std::fs;
-use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -131,7 +130,13 @@ fn git(workspace: &Path, args: &[&str]) -> Result<String, Box<dyn Error>> {
         )
         .into());
     }
-    Ok(String::from_utf8(output.stdout)?
+    // Lossy, not strict: `patch()` runs this over real diff content, which
+    // can legitimately contain non-UTF-8 bytes (binary files, non-UTF-8
+    // source encodings). A strict decode would make `ochna diff` crash on
+    // exactly the historical/real-world diffs it exists to review, instead
+    // of degrading gracefully like `live_git_status`/`live_git_head` already
+    // do for git's other output streams.
+    Ok(String::from_utf8_lossy(&output.stdout)
         .trim_end_matches('\n')
         .to_string())
 }
@@ -351,34 +356,6 @@ fn directory_size(path: &Path) -> std::io::Result<u64> {
     Ok(total)
 }
 
-fn current_index_is_fresh(workspace: &Path, conn: &Connection) -> rusqlite::Result<bool> {
-    let mut stmt = conn.prepare("SELECT file_path, content_hash FROM files ORDER BY file_path")?;
-    let indexed = stmt
-        .query_map([], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-        })?
-        .collect::<rusqlite::Result<BTreeMap<_, _>>>()?;
-    let discovered = super::discover_source_files(workspace)
-        .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
-    if discovered.len() != indexed.len() {
-        return Ok(false);
-    }
-    for path in discovered {
-        let path_string = path.to_string_lossy().replace('\\', "/");
-        let Some(expected) = indexed.get(&path_string) else {
-            return Ok(false);
-        };
-        let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        fs::read_to_string(workspace.join(path))
-            .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?
-            .hash(&mut hasher);
-        if format!("{:x}", hasher.finish()) != *expected {
-            return Ok(false);
-        }
-    }
-    Ok(true)
-}
-
 fn archive_revision(
     workspace: &Path,
     revision: &str,
@@ -555,7 +532,7 @@ pub fn run_diff(
         .as_ref()
         .map(|snapshot| snapshot.graph.clone())
         .unwrap_or_else(|| current_graph.clone());
-    if base.is_some() && head.is_none() && !current_index_is_fresh(workspace, &conn)? {
+    if base.is_some() && head.is_none() && !super::indexed_sources_are_fresh(&conn, workspace)? {
         return structured_failure(
             json_mode,
             "current_index_stale",
@@ -820,7 +797,34 @@ pub fn run_diff(
 
 #[cfg(test)]
 mod tests {
-    use super::{cap_changed_files, parse_hunks, ChangedFile, MAX_CHANGED_FILES};
+    use super::{cap_changed_files, parse_hunks, run_diff, ChangedFile, MAX_CHANGED_FILES};
+    use crate::commands::run_init;
+    use std::fs;
+    use std::path::PathBuf;
+
+    fn temp_dir() -> PathBuf {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::time::{SystemTime, UNIX_EPOCH};
+        static COUNTER: AtomicUsize = AtomicUsize::new(0);
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "ochna_diff_test_{nonce}_{}",
+            COUNTER.fetch_add(1, Ordering::SeqCst)
+        ));
+        fs::create_dir_all(&path).unwrap();
+        path
+    }
+
+    fn git(workspace: &std::path::Path, args: &[&str]) {
+        std::process::Command::new("git")
+            .args(args)
+            .current_dir(workspace)
+            .output()
+            .unwrap();
+    }
 
     #[test]
     fn parses_new_ranges_and_preserves_deleted_file_paths() {
@@ -854,5 +858,43 @@ mod tests {
         assert_eq!(files.len(), MAX_CHANGED_FILES);
         assert_eq!(files.first().unwrap().path, "src/000.rs");
         assert_eq!(files.last().unwrap().path, "src/499.rs");
+    }
+
+    #[test]
+    fn diff_reports_stale_gracefully_instead_of_erroring_on_non_utf8_change() {
+        let workspace = temp_dir();
+        fs::create_dir_all(workspace.join("src")).unwrap();
+        fs::write(workspace.join("src/lib.rs"), "pub fn helper() {}\n").unwrap();
+
+        git(&workspace, &["init"]);
+        git(
+            &workspace,
+            &["config", "user.email", "ochna@example.invalid"],
+        );
+        git(&workspace, &["config", "user.name", "Ochna Test"]);
+        git(&workspace, &["add", "-A"]);
+        git(&workspace, &["commit", "-m", "baseline"]);
+
+        run_init(&workspace, false).unwrap();
+
+        // A previously-indexed file whose content changes to invalid UTF-8
+        // (e.g. a bad paste/merge artifact) is real staleness: the current
+        // index's `diff --base` gate must report it as a structured
+        // "current_index_stale" failure, not propagate a raw IO/decode error
+        // from the freshness check itself.
+        fs::write(workspace.join("src/lib.rs"), [0x66, 0x6e, 0x20, 0xff, 0xfe]).unwrap();
+
+        let result = run_diff(&workspace, Some("HEAD"), None, &[], 50, true);
+        assert!(
+            result.is_err(),
+            "diff should report the stale index as a controlled failure, not succeed silently"
+        );
+        let message = result.unwrap_err().to_string();
+        assert!(
+            message.contains("stale"),
+            "expected a staleness message, got: {message}"
+        );
+
+        fs::remove_dir_all(&workspace).unwrap();
     }
 }

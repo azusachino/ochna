@@ -1,7 +1,7 @@
 //! Read-only inspection commands: `status` (counts + git baseline) and `files`.
 
 use crate::{
-    commands::{discover_source_files, language_for_path},
+    commands::{discover_source_files, language_for_path, should_skip_dir},
     db, parser,
 };
 use rusqlite::Connection;
@@ -278,19 +278,7 @@ fn source_extension_counts(workspace: &Path) -> BTreeMap<String, i64> {
             let name = entry.file_name();
             let name = name.to_string_lossy();
             if path.is_dir() {
-                if matches!(
-                    name.as_ref(),
-                    ".git"
-                        | ".ochna"
-                        | "clones"
-                        | "target"
-                        | "node_modules"
-                        | ".venv"
-                        | "vendor"
-                        | "build"
-                        | "dist"
-                ) || name.starts_with('.')
-                {
+                if should_skip_dir(&name, false) {
                     continue;
                 }
                 visit(&path, counts);
@@ -323,8 +311,14 @@ fn calculate_content_hash(content: &str) -> String {
 }
 
 /// Freshness is structural: unrelated dirty files warn but do not invalidate a
-/// graph whose indexed source content still matches the workspace.
-fn indexed_sources_are_fresh(conn: &Connection, workspace: &Path) -> rusqlite::Result<bool> {
+/// graph whose indexed source content still matches the workspace. Shared by
+/// `status`, `doctor`, and `diff`'s current-index staleness gate so there is
+/// exactly one freshness implementation, not several that can drift (see
+/// docs/adr/0006-freshness-checks-reuse-the-indexing-pipeline.md).
+pub(crate) fn indexed_sources_are_fresh(
+    conn: &Connection,
+    workspace: &Path,
+) -> rusqlite::Result<bool> {
     let mut stmt = conn.prepare("SELECT file_path, content_hash FROM files ORDER BY file_path")?;
     let indexed: Vec<(String, String)> = stmt
         .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?

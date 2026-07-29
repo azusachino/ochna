@@ -45,7 +45,7 @@ Create a local database at `<workspace_root>/.ochna/ochna.db` and perform the in
 ```bash
 ochna init
 ```
-By default, generated/library directories such as `target`, `node_modules`, `.venv`, `vendor`, `build`, and `dist` are skipped. Use `ochna init --include-library` to index them.
+By default, generated/library directories such as `target`, `node_modules`, `.venv`, `vendor`, `build`, `dist`, and `clones` are skipped. Use `ochna init --include-library` to index them.
 
 ### 2. Keep it in sync
 Incrementally update the index after code changes (only modified files are re-parsed):

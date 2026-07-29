@@ -10,11 +10,12 @@ mod status;
 
 pub use diff::run_diff;
 pub use index::run_init;
-pub(crate) use index::{discover_source_files, language_for_path};
+pub(crate) use index::{discover_source_files, language_for_path, should_skip_dir};
 pub(crate) use query::run_impact;
 pub use query::{
     run_callees, run_callers, run_explore, run_howto, run_node, run_search, run_tests_for,
 };
+pub(crate) use status::indexed_sources_are_fresh;
 pub use status::{run_doctor, run_files, run_status, run_unresolved};
 
 #[cfg(test)]
@@ -416,6 +417,7 @@ mod tests {
         fs::create_dir_all(temp_workspace.join("tests")).unwrap();
         fs::create_dir_all(temp_workspace.join("vendor")).unwrap();
         fs::create_dir_all(temp_workspace.join("target")).unwrap();
+        fs::create_dir_all(temp_workspace.join("clones")).unwrap();
 
         fs::write(temp_workspace.join("src/main.rs"), "fn app_main() {}\n").unwrap();
         fs::write(
@@ -439,6 +441,7 @@ mod tests {
             "fn generated() {}\n",
         )
         .unwrap();
+        fs::write(temp_workspace.join("clones/nested.rs"), "fn nested() {}\n").unwrap();
 
         run_init(&temp_workspace, false).unwrap();
 
@@ -466,13 +469,13 @@ mod tests {
         run_init(&temp_workspace, true).unwrap();
         let library_files: i64 = conn
             .query_row(
-                "SELECT COUNT(*) FROM files WHERE file_path IN ('vendor/lib.rs', 'target/generated.rs')",
+                "SELECT COUNT(*) FROM files WHERE file_path IN ('vendor/lib.rs', 'target/generated.rs', 'clones/nested.rs')",
                 [],
                 |row| row.get(0),
             )
             .unwrap();
         assert_eq!(
-            library_files, 2,
+            library_files, 3,
             "--include-library should index library dirs"
         );
 
