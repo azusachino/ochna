@@ -39,11 +39,22 @@ Operational facts
 - Add global `--json` for machine-readable stdout; add global `--no-tests` to hide symbols classified from test paths.
 - `init`/`sync` skip library/generated dirs (target, node_modules, .venv, vendor, build, dist) by default; pass `--include-library` to index them.
 - Diagnostics and progress go to stderr; JSON stdout is kept parseable.
+
+Review workflow
+
+1. Run `ochna doctor` before trusting graph evidence — reports index/schema/freshness, a `trust_verdict` (trusted/degraded/unusable), resolution tiers, unresolved/collision/low-quality diagnostics, and exits nonzero when degraded or unusable.
+2. Run `ochna diff (--base <rev> [--head <rev>] | --files <path>...)` to map a Git range or explicit paths onto changed symbols and edges; `--base` alone diffs against the current worktree, `--base`+`--head` compares two revisions via disposable temporary indexes. Read-only; never mutates Git state.
+3. Run `ochna impact <symbol> [--depth <n>] [--direction callers|callees|both] [--min-confidence <n>]` for a bounded, confidence-labelled blast radius (default depth 2, min-confidence 30); it reports `affected_tests` and `unresolved_boundaries`, and refuses to guess rather than exploding across an ambiguous or common name.
+4. Run `ochna tests-for <symbol>` for test symbols with a structural path to it, each labelled `direct_call`, `same_module_candidate`, or `name_heuristic` — a candidate or heuristic result is never proof of coverage.
+5. Run `ochna unresolved [--in <path-prefix>] [--limit <n>]` to list call sites that could not be resolved to a trusted edge, each with an explicit reason (`missing_target`, `ambiguous_target`, `macro_or_function`, `indirect_call`).
+
+All review commands accept `--workspace`/`-C`, `--json`, and `--no-tests`; JSON mode emits the frozen `contract_version: "0.3"` envelope (`ok`, `data`, `warnings`, `truncated`, `next_action`) documented in `docs/v0.3-contract.md`.
 "#;
 
 #[derive(Serialize)]
 struct HowtoDescriptor<'a> {
     flow: [&'a str; 6],
+    review_flow: [&'a str; 5],
     rule: &'a str,
     commands: HowtoCommands<'a>,
     node_modes: [&'a str; 3],
@@ -64,6 +75,12 @@ struct HowtoCommands<'a> {
     files: &'a str,
     init: &'a str,
     sync: &'a str,
+    doctor: &'a str,
+    unresolved: &'a str,
+    #[serde(rename = "tests-for")]
+    tests_for: &'a str,
+    impact: &'a str,
+    diff: &'a str,
 }
 
 #[derive(Serialize)]
@@ -83,6 +100,7 @@ pub fn run_howto(json: bool) -> Result<(), Box<dyn Error>> {
     if json {
         let descriptor = HowtoDescriptor {
             flow: ["status", "search", "callers", "callees", "node", "explore"],
+            review_flow: ["doctor", "diff", "impact", "tests-for", "unresolved"],
             rule: "ochna complements rg/ast-grep: use it for symbol and call-graph lookups; use rg for free-text/regex and ast-grep for structural AST patterns",
             commands: HowtoCommands {
                 status: "check whether the local index exists, matches the binary schema, and is fresh enough to trust",
@@ -94,6 +112,11 @@ pub fn run_howto(json: bool) -> Result<(), Box<dyn Error>> {
                 files: "list indexed files and per-file symbol counts",
                 init: "create .ochna/ochna.db and build the initial index",
                 sync: "incrementally update the existing index after source changes",
+                doctor: "review preflight: index/schema/freshness, a trust_verdict (trusted/degraded/unusable), resolution tiers, and unresolved/collision/low-quality diagnostics; exits nonzero when degraded or unusable",
+                unresolved: "list call sites that could not be resolved to a trusted edge, each with an explicit reason (missing_target, ambiguous_target, macro_or_function, indirect_call)",
+                tests_for: "find test symbols with a structural path to a production symbol, labelled direct_call, same_module_candidate, or name_heuristic; never claims proof of runtime coverage",
+                impact: "bounded confidence-labelled traversal from a resolved symbol (default depth 2, min-confidence 30); reports affected_tests and unresolved_boundaries, and refuses to guess across an ambiguous or common name rather than exploding unbounded",
+                diff: "map a Git range (--base [--head]) or explicit --files onto changed symbols/edges; historical ranges use disposable temporary indexes and report base_revision_unavailable rather than guessing on a shallow clone",
             },
             node_modes: [
                 "node --file <path> --symbols-only: list the symbols defined in a file",

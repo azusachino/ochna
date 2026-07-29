@@ -9,6 +9,95 @@ Each release carries a **Performance** note for indexing-pipeline changes.
 test giants (`make report`); the numbers quoted here are directional and
 machine-dependent.
 
+## [0.3.0] — 2026-07-29
+
+Turns ochna from a fast symbol-lookup index into a diff-aware structural
+review tool, frozen as a single contract in `docs/v0.3-contract.md`.
+
+### Added
+
+- `ochna doctor`, the review preflight: index/schema/freshness, a
+  machine-readable `trust_verdict` (`trusted`/`degraded`/`unusable`),
+  resolution-tier breakdown, collision-prone names, and low-quality
+  locations/unsupported-extension diagnostics. Exits nonzero when the graph
+  is degraded or unusable.
+- `ochna unresolved [--in <path-prefix>] [--limit <n>]`, listing call sites
+  that could not become a trusted edge, each with an explicit reason
+  (`missing_target`, `ambiguous_target`, `macro_or_function`,
+  `indirect_call`).
+- `ochna tests-for <symbol> [--in <path-prefix>] [--limit <n>]`, returning
+  test symbols with a structural path to a production symbol, labelled
+  `direct_call`, `same_module_candidate`, or `name_heuristic` — never
+  claimed as proof of runtime coverage.
+- `ochna impact <symbol> [--depth <n>] [--direction callers|callees|both]
+  [--min-confidence <n>] [--limit <n>]`, a bounded confidence-labelled
+  traversal (default depth 2, min-confidence 30; max depth 5/200 nodes/400
+  edges) that preserves every distinct root-to-node path, reports
+  `affected_tests` and `unresolved_boundaries`, and refuses to guess across
+  an ambiguous or common name rather than exploding into unbounded fanout.
+- `ochna diff (--base <rev> [--head <rev>] | --files <path>...) [--limit
+  <n>]`, mapping a Git range or explicit changed paths onto indexed
+  symbols/edges. Historical ranges use disposable temporary indexes and
+  report real added/removed/modified symbols, edges, and newly unresolved
+  callers; a revision unavailable on a shallow clone returns a structured
+  `base_revision_unavailable` failure rather than a fabricated diff.
+- Explicit Java/Spring framework relationship edges: `route_handler`,
+  `injected_into`, `configuration_binds`, `publishes_event`,
+  `consumes_event`, `feign_calls`, `grpc_calls`, each carrying a confidence
+  tier (`framework_annotation` 85, `framework_declaration` 80,
+  `framework_convention` 70) distinct from compiler-exact edges.
+- Schema v6: relationship-aware raw call edges backing the new framework
+  and test relationships.
+- `ochna howto` (both text and `--json`) now documents the review workflow
+  (`doctor` → `diff` → `impact` → `tests-for` → `unresolved`) alongside the
+  existing lookup flow.
+- `fixtures/review-v0.3`, a deterministic before/after fixture backing the
+  contract's acceptance user stories.
+
+### Changed
+
+- Bumped crate version to `0.3.0`.
+- `docs/v0.3-contract.md` freezes the human/JSON contract, corpus
+  benchmarks, and output budgets for every command above; the read-only MCP
+  adapter designed alongside it is **deferred** (no concrete MCP-only
+  consumer, discovery/allow-list requirement, or persistent-service need was
+  demonstrated) — its contract remains frozen design material, not shipped
+  in this release.
+- `SKILL.md` documents the review workflow and its judgment notes (common
+  Netty/Kubernetes-scale `doctor` verdicts, ambiguous-name `impact` refusal,
+  the `tests-for` indirect-coverage limitation below).
+
+### Known limitations
+
+- `tests-for` returns an empty result for a production symbol whose only
+  test coverage is *indirect* (e.g. a JUnit wrapper that triggers it via
+  object lifecycle rather than a direct call) — confirmed unchanged against
+  Netty PR 16959's `releaseAndFailQueuedWrite` in
+  `docs/experiments/v0.3-acceptance-netty.md`. This is a deliberate
+  tradeoff (never inflate coverage with an unproven heuristic), not a bug.
+- `doctor --json`'s `collision_prone_names`/`low_quality_locations` arrays
+  are uncapped; on a large monorepo (Kubernetes: 35,872 / 10,342 entries)
+  this produced a 6.4MB JSON document. Contract-compliant today (no stated
+  cap on those arrays) but worth a budget in a future contract revision.
+
+### Verification
+
+- Local gates: `make check`, `make test` (38), `make install`,
+  `make verify-clis` all pass.
+- Corpus acceptance (`docs/experiments/v0.3-acceptance-{netty,kubernetes,linux}.md`):
+  Netty (`releaseAndFailQueuedWrite` → 3 `handlerRemoved` callers), Kubernetes
+  (PR 139848 watch-cache test mapping plus a `GetList` common-name budget
+  stress test), and Linux (`strncpy` removal absence plus a truthful
+  shallow-clone `diff` failure) all pass their contract-required evidence.
+  Every run indexed a disposable `/tmp` copy of the pinned commit; the
+  `clones/*` submodules were never entered or mutated.
+
+### Performance
+
+- No indexing-pipeline changes to the existing call-resolution cascade;
+  the new commands are additional read queries over the existing schema
+  plus the v6 relationship-aware edges.
+
 ## [0.1.0] — 2026-06-24
 
 ### Added
