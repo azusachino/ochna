@@ -345,4 +345,52 @@ mod tests {
         let fts_results_after_delete = search_nodes_fts(&conn, "magic").unwrap();
         assert!(fts_results_after_delete.is_empty());
     }
+
+    #[test]
+    fn search_nodes_fts_treats_special_characters_as_literal_text() {
+        let conn = Connection::open_in_memory().unwrap();
+        init_schema(&conn).unwrap();
+
+        let hyphenated = Node {
+            id: "src/lib.rs::my-helper".to_string(),
+            name: "my-helper".to_string(),
+            kind: "function".to_string(),
+            qualified_name: Some("my-helper".to_string()),
+            file_path: "src/lib.rs".to_string(),
+            start_line: 1,
+            end_line: 1,
+            start_column: 0,
+            end_column: 0,
+            signature: None,
+            doc_comment: None,
+            is_test: false,
+            resolution_kind: None,
+            confidence: None,
+        };
+        let decoy = Node {
+            id: "src/lib.rs::my".to_string(),
+            name: "my".to_string(),
+            qualified_name: Some("my".to_string()),
+            ..hyphenated.clone()
+        };
+        upsert_node(&conn, &hyphenated).unwrap();
+        upsert_node(&conn, &decoy).unwrap();
+
+        // A raw, unescaped FTS5 query would read the leading `-` as the NOT
+        // operator (`my AND NOT helper`), excluding the very row that
+        // contains both tokens. Quoted per-term, it must match instead.
+        let results = search_nodes_fts(&conn, "my-helper").unwrap();
+        let ids: Vec<_> = results.iter().map(|n| n.id.as_str()).collect();
+        assert!(
+            ids.contains(&"src/lib.rs::my-helper"),
+            "hyphenated query should match the row containing both tokens, got {ids:?}"
+        );
+
+        // Other FTS5 syntax characters must also be treated as literal text,
+        // not query operators (`*` prefix, `:` column filter, quotes, parens).
+        for query in ["\"quoted\"", "name:my", "(my)", "my*"] {
+            search_nodes_fts(&conn, query)
+                .unwrap_or_else(|e| panic!("query {query:?} should not error: {e}"));
+        }
+    }
 }

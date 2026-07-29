@@ -34,14 +34,16 @@ patterns already fixed once in 0.3.1.
   files, or source in a non-UTF-8 encoding): its `git()` helper decoded
   stdout with strict `String::from_utf8` instead of the lossy decode used
   everywhere else in the codebase for git output.
-
-### Known issue (not fixed this release)
-
-- `search`'s FTS5 query passes raw user input into `MATCH` unescaped. A
-  query containing FTS5 syntax characters (`-`, `"`, `*`, `:`, parens) can
-  be silently reinterpreted as a boolean/phrase/prefix expression instead
-  of literal text, and the exact-name/`LIKE` fallback only engages when FTS
-  returns zero rows, not when it returns a wrongly-filtered nonempty set.
+- `search`'s FTS5 query passed raw user input into `MATCH` unescaped. A
+  query containing FTS5 syntax characters (`-`, `"`, `*`, `:`, parens) could
+  be silently reinterpreted as a boolean/phrase/prefix expression instead of
+  literal text — e.g. `my-helper` read as `my AND NOT helper`, excluding the
+  very row that contains both tokens — and the exact-name/`LIKE` fallback
+  only engages when FTS returns zero rows, not a wrongly-filtered nonempty
+  set. Fixed by quoting each whitespace-separated term as its own FTS5
+  phrase rather than the whole query as one phrase, which neutralizes
+  special characters within a term while preserving FTS5's implicit
+  AND-across-terms behavior that legitimate multi-word searches rely on.
 
 ## [0.3.1] — 2026-07-29
 
