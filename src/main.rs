@@ -6,6 +6,17 @@ use clap::{Parser, Subcommand};
 use std::error::Error;
 use std::path::PathBuf;
 
+fn parse_unresolved_limit(value: &str) -> Result<usize, String> {
+    let limit = value
+        .parse::<usize>()
+        .map_err(|_| "limit must be a positive integer".to_string())?;
+    if (1..=200).contains(&limit) {
+        Ok(limit)
+    } else {
+        Err("limit must be between 1 and 200".to_string())
+    }
+}
+
 #[derive(Parser, Debug)]
 #[command(name = "ochna")]
 #[command(author, version, about = "Code graph indexing and analysis tool", long_about = None)]
@@ -42,6 +53,17 @@ enum Commands {
     Howto,
     /// Display index statistics
     Status,
+    /// Inspect index health and graph-quality diagnostics for structural review
+    Doctor,
+    /// List call sites whose targets could not be resolved
+    Unresolved {
+        /// Only include source files whose path starts with this prefix
+        #[arg(long = "in")]
+        in_path: Option<String>,
+        /// Maximum references to return (default 50, maximum 200)
+        #[arg(long, default_value_t = 50, value_parser = parse_unresolved_limit)]
+        limit: usize,
+    },
     /// List indexed files with metadata
     Files,
     /// Search for nodes/symbols matching a query string
@@ -156,6 +178,12 @@ fn main() -> Result<(), Box<dyn Error>> {
         }
         Commands::Status => {
             commands::run_status(&current_dir, json)?;
+        }
+        Commands::Doctor => {
+            commands::run_doctor(&current_dir, json)?;
+        }
+        Commands::Unresolved { in_path, limit } => {
+            commands::run_unresolved(&current_dir, in_path.as_deref(), limit, json)?;
         }
         Commands::Files => {
             commands::run_files(&current_dir, json)?;

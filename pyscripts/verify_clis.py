@@ -63,7 +63,7 @@ def main() -> int:
         (tmp / "tests").mkdir()
         (tmp / "src" / "lib.rs").write_text(
             "pub fn helper() {}\n\n"
-            "pub fn caller_one() {\n    helper();\n}\n\n"
+            "pub fn caller_one() {\n    helper();\n    missing();\n    missing_two();\n}\n\n"
             "pub fn caller_two() {\n    helper();\n}\n",
             encoding="utf-8",
         )
@@ -102,6 +102,33 @@ def main() -> int:
         pointer = tmp / ".ochna" / "AGENT.md"
         assert pointer.is_file()
         assert "ochna howto" in pointer.read_text(encoding="utf-8")
+
+        # --- doctor/unresolved: review preflight and stable unresolved evidence ---
+        doctor_process = run([ochna, "doctor", "--json"], tmp, check=False)
+        assert doctor_process.returncode == 0, doctor_process.stdout + doctor_process.stderr
+        doctor = assert_json(doctor_process.stdout)
+        assert doctor["ok"] is True
+        assert doctor["data"]["schema"]["expected"] == doctor["data"]["schema"]["actual"]
+        assert doctor["data"]["graph_quality"]["trust_verdict"] == "trusted"
+        assert "resolution_tiers" in doctor["data"]["graph_quality"]
+        unresolved = assert_json(run([ochna, "unresolved", "--json"], tmp).stdout)
+        references = unresolved["data"]["references"]
+        assert len(references) == 2
+        assert references[0]["specifier"] == "missing"
+        assert references[0]["reason"] == "missing_target"
+        unresolved_limited = assert_json(
+            run([ochna, "unresolved", "--json", "--limit", "1"], tmp).stdout
+        )
+        assert len(unresolved_limited["data"]["references"]) == 1
+        assert unresolved_limited["truncated"] is True
+
+        # A dirty non-source file is a warning, not an index-health failure.
+        (tmp / "README.md").write_text("review notes\n", encoding="utf-8")
+        dirty_doctor = assert_json(run([ochna, "doctor", "--json"], tmp).stdout)
+        assert dirty_doctor["ok"] is True
+        assert dirty_doctor["data"]["freshness"] == "fresh"
+        assert dirty_doctor["warnings"][0]["code"] == "dirty_worktree"
+        (tmp / "README.md").unlink()
 
         # --- status --json preflight verdict: fresh index is ok ---
         status = assert_json(run([ochna, "status", "--json"], tmp).stdout)
