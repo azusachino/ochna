@@ -265,6 +265,101 @@ def main() -> int:
         assert fresh["freshness"] == "fresh"
         assert fresh["action"] == "none"
 
+        # --- diff: materialized v0.3 before/after review story. The current
+        # index maps only the reviewed tree, so deletion reports stay explicit
+        # about their historical-index boundary.
+        review = Path(tempfile.mkdtemp(prefix="ochna-review-v0.3."))
+        try:
+            fixture = repo_root / "fixtures" / "review-v0.3"
+            shutil.copytree(fixture / "before", review, dirs_exist_ok=True)
+            run(["git", "init"], review)
+            run(["git", "config", "user.email", "ochna@example.invalid"], review)
+            run(["git", "config", "user.name", "Ochna Verify"], review)
+            run(["git", "add", "-A"], review)
+            run(["git", "commit", "-m", "baseline"], review)
+            shutil.copytree(fixture / "after", review, dirs_exist_ok=True)
+            run([ochna, "init"], review)
+            diff = assert_json(run([ochna, "diff", "--base", "HEAD", "--json"], review).stdout)
+            assert diff["command"] == "diff"
+            changed = {row["symbol"]["id"] for row in diff["data"]["symbols"] if row["symbol"]}
+            assert {"src/lib.rs::render", "src/lib.rs::render_page"} <= changed
+            assert any(row["symbol"] is None and row["change"] == "removed" for row in diff["data"]["symbols"])
+            assert diff["warnings"][0]["code"] == "historical_index_required"
+            assert diff["data"]["newly_unresolved_callers"] == [{
+                "source": "src/lib.rs::render_page", "specifier": "missing_renderer", "reason": "missing_target"
+            }]
+            assert {row["path"] for row in diff["data"]["unmapped_hunks"]} == {"README.md"}
+            explicit = assert_json(run([ochna, "diff", "--files", "src/lib.rs", "tests/render_tests.rs", "--json"], review).stdout)
+            assert explicit["data"]["base"] is None and explicit["data"]["head"] is None
+            assert {row["path"] for row in explicit["data"]["files"]} == {"src/lib.rs", "tests/render_tests.rs"}
+        finally:
+            shutil.rmtree(review, ignore_errors=True)
+
+        # Hunk ranges may span several current symbols. Only unresolved calls
+        # on newly-added patch lines are called "newly" without task 6's
+        # historical graph; an unchanged unresolved call is not relabelled.
+        regression = Path(tempfile.mkdtemp(prefix="ochna-diff-regression."))
+        try:
+            (regression / "src").mkdir()
+            (regression / "src" / "lib.rs").write_text(
+                "fn unchanged() { existing_missing(); }\n"
+                "fn first() { }\n"
+                "fn second() { }\n", encoding="utf-8"
+            )
+            run(["git", "init"], regression)
+            run(["git", "config", "user.email", "ochna@example.invalid"], regression)
+            run(["git", "config", "user.name", "Ochna Verify"], regression)
+            run(["git", "add", "-A"], regression)
+            run(["git", "commit", "-m", "baseline"], regression)
+            (regression / "src" / "lib.rs").write_text(
+                "fn unchanged() { existing_missing(); }\n"
+                "fn first() { newly_missing(); }\n"
+                "fn second() { 1 + 1; }\n", encoding="utf-8"
+            )
+            run([ochna, "init"], regression)
+            regression_diff = assert_json(run([ochna, "diff", "--base", "HEAD", "--json"], regression).stdout)
+            regression_symbols = {row["symbol"]["id"] for row in regression_diff["data"]["symbols"] if row["symbol"]}
+            assert {"src/lib.rs::first", "src/lib.rs::second"} <= regression_symbols
+            assert regression_diff["data"]["newly_unresolved_callers"] == [{
+                "source": "src/lib.rs::first", "specifier": "newly_missing", "reason": "missing_target"
+            }]
+        finally:
+            shutil.rmtree(regression, ignore_errors=True)
+
+        # Renames have no content hunk when Git detects a 100% move, while a
+        # pure deletion has only a zero-count hunk. Both remain visible without
+        # inventing historical symbol identities.
+        lifecycle = Path(tempfile.mkdtemp(prefix="ochna-diff-lifecycle."))
+        try:
+            (lifecycle / "src").mkdir()
+            (lifecycle / "src" / "original.rs").write_text("fn kept() {}\n", encoding="utf-8")
+            (lifecycle / "src" / "deleted.rs").write_text("fn gone() {}\n", encoding="utf-8")
+            run(["git", "init"], lifecycle)
+            run(["git", "config", "user.email", "ochna@example.invalid"], lifecycle)
+            run(["git", "config", "user.name", "Ochna Verify"], lifecycle)
+            run(["git", "add", "-A"], lifecycle)
+            run(["git", "commit", "-m", "baseline"], lifecycle)
+            run(["git", "mv", "src/original.rs", "src/renamed.rs"], lifecycle)
+            (lifecycle / "src" / "deleted.rs").unlink()
+            run([ochna, "init"], lifecycle)
+            lifecycle_diff = assert_json(run([ochna, "diff", "--base", "HEAD", "--json"], lifecycle).stdout)
+            assert {row["status"] for row in lifecycle_diff["data"]["files"]} == {"renamed", "deleted"}
+            assert "src/renamed.rs::kept" in {row["symbol"]["id"] for row in lifecycle_diff["data"]["symbols"] if row["symbol"]}
+            assert any(row["symbol"] is None and row["change"] == "removed" for row in lifecycle_diff["data"]["symbols"])
+            missing = assert_json(run([ochna, "diff", "--files", "missing.rs", "--json"], lifecycle).stdout)
+            assert missing["data"]["files"] == [{"path": "missing.rs", "status": "deleted"}]
+            assert missing["data"]["symbols"][0]["symbol"] is None
+            assert missing["warnings"][0]["code"] == "historical_index_required"
+            too_many = run(
+                [ochna, "diff", "--files", *[f"missing-{i}.rs" for i in range(501)]],
+                lifecycle,
+                check=False,
+            )
+            assert too_many.returncode != 0
+            assert "at most 500" in too_many.stderr
+        finally:
+            shutil.rmtree(lifecycle, ignore_errors=True)
+
         print("verify_clis ok")
         return 0
     finally:

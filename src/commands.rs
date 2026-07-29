@@ -3,10 +3,12 @@
 //! - [`status`] — read-only `status`/`files` inspection.
 //! - [`query`] — `search`/`callers`/`node`/`explore` graph queries.
 
+mod diff;
 mod index;
 mod query;
 mod status;
 
+pub use diff::run_diff;
 pub(crate) use index::discover_source_files;
 pub use index::run_init;
 pub use query::{

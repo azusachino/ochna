@@ -28,6 +28,17 @@ fn parse_tests_for_limit(value: &str) -> Result<usize, String> {
     }
 }
 
+fn parse_diff_limit(value: &str) -> Result<usize, String> {
+    let limit = value
+        .parse::<usize>()
+        .map_err(|_| "limit must be a positive integer".to_string())?;
+    if (1..=500).contains(&limit) {
+        Ok(limit)
+    } else {
+        Err("limit must be between 1 and 500".to_string())
+    }
+}
+
 #[derive(Parser, Debug)]
 #[command(name = "ochna")]
 #[command(author, version, about = "Code graph indexing and analysis tool", long_about = None)]
@@ -84,6 +95,21 @@ enum Commands {
         in_path: Option<String>,
         /// Maximum test relationships to return (default 30, maximum 100)
         #[arg(long, default_value_t = 30, value_parser = parse_tests_for_limit)]
+        limit: usize,
+    },
+    /// Map a Git change or explicit paths onto current indexed symbols
+    Diff {
+        /// Git revision to compare from (optionally with --head)
+        #[arg(long, conflicts_with = "files")]
+        base: Option<String>,
+        /// Git revision to compare to; requires --base
+        #[arg(long, requires = "base")]
+        head: Option<String>,
+        /// Current workspace-relative paths to map without asking Git for a range
+        #[arg(long, num_args = 1.., conflicts_with = "base")]
+        files: Vec<String>,
+        /// Maximum changed symbols to return (default 100, maximum 500)
+        #[arg(long, default_value_t = 100, value_parser = parse_diff_limit)]
         limit: usize,
     },
     /// List indexed files with metadata
@@ -221,6 +247,27 @@ fn main() -> Result<(), Box<dyn Error>> {
                 no_tests,
             )?;
         }
+        Commands::Diff {
+            base,
+            head,
+            files,
+            limit,
+        } => {
+            if base.is_none() && files.is_empty() {
+                return Err(
+                    "diff requires exactly one selector: --base <revision> or --files <path>..."
+                        .into(),
+                );
+            }
+            commands::run_diff(
+                &current_dir,
+                base.as_deref(),
+                head.as_deref(),
+                &files,
+                limit,
+                json,
+            )?;
+        }
         Commands::Files => {
             commands::run_files(&current_dir, json)?;
         }
@@ -339,5 +386,18 @@ mod tests {
             _ => panic!("expected tests-for command"),
         }
         assert!(Cli::try_parse_from(["ochna", "tests-for", "render", "--limit", "101"]).is_err());
+    }
+
+    #[test]
+    fn diff_requires_one_selector_and_enforces_its_limit() {
+        assert!(Cli::try_parse_from(["ochna", "diff", "--base", "HEAD", "--limit", "500"]).is_ok());
+        assert!(Cli::try_parse_from(["ochna", "diff", "--files", "src/lib.rs"]).is_ok());
+        assert!(
+            Cli::try_parse_from(["ochna", "diff", "--base", "HEAD", "--files", "src/lib.rs"])
+                .is_err()
+        );
+        assert!(
+            Cli::try_parse_from(["ochna", "diff", "--base", "HEAD", "--limit", "501"]).is_err()
+        );
     }
 }
