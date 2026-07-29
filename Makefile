@@ -1,7 +1,22 @@
 # ochna Makefile
 # Provides industry-standard targets for building, testing, checking quality, and installing ochna.
 
-.PHONY: all build test fmt fmt-fix lint check validate verify-clis verify_clis setup install report clean
+.DEFAULT_GOAL := help
+
+.PHONY: help all build test fmt fmt-fix lint check validate verify-clis verify_clis setup install report clean
+
+help:
+	@echo "Usage: make <target>"
+	@echo ""
+	@echo "Targets:"
+	@echo "  build        Build the release binary"
+	@echo "  test         Run the test suite"
+	@echo "  check        Check formatting and run Clippy"
+	@echo "  validate     Run checks and CLI smoke tests"
+	@echo "  setup        Shallow-clone submodules and build ochna"
+	@echo "  install      Install ochna to ~/.cargo/bin"
+	@echo "  report       Index test giants and write BENCHMARK.md"
+	@echo "  clean        Remove Cargo build artifacts"
 
 all: build
 
@@ -32,7 +47,7 @@ verify_clis: verify-clis
 
 setup:
 	@echo "Initializing Git submodules..."
-	git submodule update --init --recursive
+	git submodule update --init --recursive --depth 1
 	@echo "Initializing python virtual environment via uv..."
 	uv venv --python 3.14
 	@echo "Building ochna binary..."
