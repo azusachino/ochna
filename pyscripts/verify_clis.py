@@ -265,9 +265,9 @@ def main() -> int:
         assert fresh["freshness"] == "fresh"
         assert fresh["action"] == "none"
 
-        # --- diff: materialized v0.3 before/after review story. The current
-        # index maps only the reviewed tree, so deletion reports stay explicit
-        # about their historical-index boundary.
+        # --- diff: materialized v0.3 before/after review story. Git ranges
+        # build a bounded temporary base index, so removed identities and
+        # relationships are evidence rather than placeholders.
         review = Path(tempfile.mkdtemp(prefix="ochna-review-v0.3."))
         try:
             fixture = repo_root / "fixtures" / "review-v0.3"
@@ -283,8 +283,15 @@ def main() -> int:
             assert diff["command"] == "diff"
             changed = {row["symbol"]["id"] for row in diff["data"]["symbols"] if row["symbol"]}
             assert {"src/lib.rs::render", "src/lib.rs::render_page"} <= changed
-            assert any(row["symbol"] is None and row["change"] == "removed" for row in diff["data"]["symbols"])
-            assert diff["warnings"][0]["code"] == "historical_index_required"
+            assert any(
+                row["symbol"]["id"] == "src/lib.rs::legacy_render" and row["change"] == "removed"
+                for row in diff["data"]["symbols"]
+            )
+            assert diff["warnings"] == []
+            assert diff["data"]["historical_snapshot"]["base_index"] == "temporary"
+            assert diff["data"]["historical_snapshot"]["temporary_bytes"] > 0
+            assert diff["data"]["historical_snapshot"]["elapsed_ms"] >= 0
+            assert diff["data"]["historical_snapshot"]["cleanup"] == "removed"
             assert diff["data"]["newly_unresolved_callers"] == [{
                 "source": "src/lib.rs::render_page", "specifier": "missing_renderer", "reason": "missing_target"
             }]
@@ -354,8 +361,8 @@ def main() -> int:
             shutil.rmtree(regression, ignore_errors=True)
 
         # Renames have no content hunk when Git detects a 100% move, while a
-        # pure deletion has only a zero-count hunk. Both remain visible without
-        # inventing historical symbol identities.
+        # pure deletion has only a zero-count hunk. Historical indexing keeps
+        # their actual pre-change identities available.
         lifecycle = Path(tempfile.mkdtemp(prefix="ochna-diff-lifecycle."))
         try:
             (lifecycle / "src").mkdir()
@@ -372,7 +379,10 @@ def main() -> int:
             lifecycle_diff = assert_json(run([ochna, "diff", "--base", "HEAD", "--json"], lifecycle).stdout)
             assert {row["status"] for row in lifecycle_diff["data"]["files"]} == {"renamed", "deleted"}
             assert "src/renamed.rs::kept" in {row["symbol"]["id"] for row in lifecycle_diff["data"]["symbols"] if row["symbol"]}
-            assert any(row["symbol"] is None and row["change"] == "removed" for row in lifecycle_diff["data"]["symbols"])
+            assert any(
+                row["symbol"]["id"] == "src/deleted.rs::gone" and row["change"] == "removed"
+                for row in lifecycle_diff["data"]["symbols"]
+            )
             missing = assert_json(run([ochna, "diff", "--files", "missing.rs", "--json"], lifecycle).stdout)
             assert missing["data"]["files"] == [{"path": "missing.rs", "status": "deleted"}]
             assert missing["data"]["symbols"][0]["symbol"] is None
@@ -386,6 +396,73 @@ def main() -> int:
             assert "at most 500" in too_many.stderr
         finally:
             shutil.rmtree(lifecycle, ignore_errors=True)
+
+        # Deletion-heavy C history mirrors the Linux use case: the base has a
+        # small obsolete API surface and its callers; the reviewed tree removes
+        # it wholesale. The temporary archive/index must leave no directory
+        # behind after returning JSON.
+        linux_like = Path(tempfile.mkdtemp(prefix="ochna-diff-linux-like."))
+        temporary_before = set(Path(tempfile.gettempdir()).glob("ochna-historical-*"))
+        try:
+            (linux_like / "kernel").mkdir()
+            (linux_like / "kernel" / "legacy.c").write_text(
+                "static int strncpy_legacy(char *dst) { return dst[0]; }\n"
+                "int copy_user(void) { return strncpy_legacy(0); }\n"
+                "int copy_name(void) { return strncpy_legacy(0); }\n",
+                encoding="utf-8",
+            )
+            run(["git", "init"], linux_like)
+            run(["git", "config", "user.email", "ochna@example.invalid"], linux_like)
+            run(["git", "config", "user.name", "Ochna Verify"], linux_like)
+            run(["git", "add", "-A"], linux_like)
+            run(["git", "commit", "-m", "legacy copy helpers"], linux_like)
+            (linux_like / "kernel" / "legacy.c").unlink()
+            (linux_like / "kernel" / "safe.c").write_text(
+                "int copy_user(void) { return 0; }\n", encoding="utf-8"
+            )
+            run([ochna, "init"], linux_like)
+            linux_diff = assert_json(run([ochna, "diff", "--base", "HEAD", "--json"], linux_like).stdout)
+            removed = {
+                row["symbol"]["id"]
+                for row in linux_diff["data"]["symbols"]
+                if row["change"] == "removed"
+            }
+            assert {"kernel/legacy.c::strncpy_legacy", "kernel/legacy.c::copy_user", "kernel/legacy.c::copy_name"} <= removed
+            assert len([row for row in linux_diff["data"]["edges"] if row["change"] == "removed"]) >= 2
+            assert linux_diff["data"]["historical_snapshot"]["temporary_bytes"] > 0
+            assert linux_diff["data"]["historical_snapshot"]["cleanup"] == "removed"
+            assert set(Path(tempfile.gettempdir()).glob("ochna-historical-*")) == temporary_before
+        finally:
+            shutil.rmtree(linux_like, ignore_errors=True)
+
+        # A named --head is a revision selector, not an alias for the dirty
+        # workspace. Its temporary graph must win even when the current index
+        # contains a later, unrelated symbol.
+        named_head = Path(tempfile.mkdtemp(prefix="ochna-diff-named-head."))
+        try:
+            (named_head / "src").mkdir()
+            (named_head / "src" / "lib.rs").write_text("fn base() {}\n", encoding="utf-8")
+            run(["git", "init"], named_head)
+            run(["git", "config", "user.email", "ochna@example.invalid"], named_head)
+            run(["git", "config", "user.name", "Ochna Verify"], named_head)
+            run(["git", "add", "-A"], named_head)
+            run(["git", "commit", "-m", "base"], named_head)
+            base_sha = run(["git", "rev-parse", "HEAD"], named_head).stdout.strip()
+            (named_head / "src" / "lib.rs").write_text("fn head_only() {}\n", encoding="utf-8")
+            run(["git", "add", "-A"], named_head)
+            run(["git", "commit", "-m", "head"], named_head)
+            head_sha = run(["git", "rev-parse", "HEAD"], named_head).stdout.strip()
+            (named_head / "src" / "lib.rs").write_text("fn dirty_workspace_only() {}\n", encoding="utf-8")
+            run([ochna, "init"], named_head)
+            named_diff = assert_json(run([
+                ochna, "diff", "--base", base_sha, "--head", head_sha, "--json"
+            ], named_head).stdout)
+            named_symbols = {row["symbol"]["id"] for row in named_diff["data"]["symbols"] if row["symbol"]}
+            assert "src/lib.rs::head_only" in named_symbols
+            assert "src/lib.rs::dirty_workspace_only" not in named_symbols
+            assert named_diff["data"]["historical_snapshot"]["head_index"] == "temporary"
+        finally:
+            shutil.rmtree(named_head, ignore_errors=True)
 
         print("verify_clis ok")
         return 0

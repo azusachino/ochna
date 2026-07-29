@@ -5,8 +5,12 @@ use rusqlite::Connection;
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
-use std::path::Path;
-use std::process::Command;
+use std::fs;
+use std::hash::{Hash, Hasher};
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 const MAX_CHANGED_FILES: usize = 500;
 
@@ -22,6 +26,68 @@ struct Hunk {
     old_start: i64,
     new_start: i64,
     new_count: i64,
+}
+
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+struct EdgeKey {
+    source_id: String,
+    target_id: String,
+    relationship: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct EdgeSnapshot {
+    key: EdgeKey,
+    resolution_kind: String,
+    confidence: i64,
+}
+
+#[derive(Clone, Default)]
+struct GraphSnapshot {
+    nodes: BTreeMap<String, db::Node>,
+    edges: BTreeMap<EdgeKey, EdgeSnapshot>,
+    unresolved: BTreeSet<(String, String, String)>,
+}
+
+fn nodes_for_path(graph: &GraphSnapshot, path: &str) -> Vec<db::Node> {
+    graph
+        .nodes
+        .values()
+        .filter(|node| node.file_path == path)
+        .cloned()
+        .collect()
+}
+
+struct HistoricalSnapshot {
+    graph: GraphSnapshot,
+    temporary_bytes: u64,
+    elapsed_ms: u128,
+}
+
+/// A private, throw-away archive extraction. It never creates a Git worktree
+/// or writes into the user's workspace; Drop removes the entire historical
+/// source/index once the comparison has been rendered.
+struct TemporaryWorkspace(PathBuf);
+
+impl TemporaryWorkspace {
+    fn new() -> Result<Self, Box<dyn Error>> {
+        static COUNTER: AtomicUsize = AtomicUsize::new(0);
+        let nonce = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "ochna-historical-{}-{}-{}",
+            std::process::id(),
+            nonce,
+            COUNTER.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir(&path)?;
+        Ok(Self(path))
+    }
+}
+
+impl Drop for TemporaryWorkspace {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.0);
+    }
 }
 
 fn git(workspace: &Path, args: &[&str]) -> Result<String, Box<dyn Error>> {
@@ -199,6 +265,181 @@ fn unresolved_for_new_lines(
     Ok(result)
 }
 
+fn unresolved_snapshot(conn: &Connection) -> rusqlite::Result<BTreeSet<(String, String, String)>> {
+    let mut stmt = conn.prepare(
+        "SELECT n.id, u.specifier, u.kind FROM unresolved_refs u JOIN nodes n ON n.nid = u.source_nid ORDER BY n.id, u.specifier, u.kind",
+    )?;
+    let rows = stmt.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+        ))
+    })?;
+    let mut unresolved = BTreeSet::new();
+    for row in rows {
+        let (source, specifier, kind) = row?;
+        let simple = specifier.rsplit("::").next().unwrap_or(&specifier);
+        let candidates: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM nodes WHERE name = ?",
+            [simple],
+            |row| row.get(0),
+        )?;
+        let reason = if matches!(kind.as_str(), "macro_or_function" | "indirect_call") {
+            kind
+        } else if candidates > 0 {
+            "ambiguous_target".to_string()
+        } else {
+            "missing_target".to_string()
+        };
+        unresolved.insert((source, specifier, reason));
+    }
+    Ok(unresolved)
+}
+
+fn graph_snapshot(conn: &Connection) -> rusqlite::Result<GraphSnapshot> {
+    let nodes = db::query_nodes(conn, None, None, None)?
+        .into_iter()
+        .map(|node| (node.id.clone(), node))
+        .collect();
+    let mut stmt = conn.prepare(
+        "SELECT source.id, target.id, e.kind, e.resolution_kind
+         FROM edges e
+         JOIN nodes source ON source.nid = e.source_nid
+         JOIN nodes target ON target.nid = e.target_nid
+         ORDER BY source.id, target.id, e.kind",
+    )?;
+    let rows = stmt.query_map([], |row| {
+        let resolution_kind: i64 = row.get(3)?;
+        Ok(EdgeSnapshot {
+            key: EdgeKey {
+                source_id: row.get(0)?,
+                target_id: row.get(1)?,
+                relationship: row.get(2)?,
+            },
+            resolution_kind: db::label_for_kind(resolution_kind).to_string(),
+            confidence: db::confidence_for_kind(resolution_kind),
+        })
+    })?;
+    let mut edges = BTreeMap::new();
+    for edge in rows {
+        let edge = edge?;
+        edges.insert(edge.key.clone(), edge);
+    }
+    Ok(GraphSnapshot {
+        nodes,
+        edges,
+        unresolved: unresolved_snapshot(conn)?,
+    })
+}
+
+fn directory_size(path: &Path) -> std::io::Result<u64> {
+    let mut total = 0;
+    for entry in fs::read_dir(path)? {
+        let entry = entry?;
+        let metadata = entry.metadata()?;
+        if metadata.is_dir() {
+            total += directory_size(&entry.path())?;
+        } else if metadata.is_file() {
+            total += metadata.len();
+        }
+    }
+    Ok(total)
+}
+
+fn current_index_is_fresh(workspace: &Path, conn: &Connection) -> rusqlite::Result<bool> {
+    let mut stmt = conn.prepare("SELECT file_path, content_hash FROM files ORDER BY file_path")?;
+    let indexed = stmt
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?
+        .collect::<rusqlite::Result<BTreeMap<_, _>>>()?;
+    let discovered = super::discover_source_files(workspace)
+        .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
+    if discovered.len() != indexed.len() {
+        return Ok(false);
+    }
+    for path in discovered {
+        let path_string = path.to_string_lossy().replace('\\', "/");
+        let Some(expected) = indexed.get(&path_string) else {
+            return Ok(false);
+        };
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        fs::read_to_string(workspace.join(path))
+            .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?
+            .hash(&mut hasher);
+        if format!("{:x}", hasher.finish()) != *expected {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+fn archive_revision(
+    workspace: &Path,
+    revision: &str,
+    destination: &Path,
+) -> Result<(), Box<dyn Error>> {
+    let mut archive = Command::new("git")
+        .args(["archive", "--format=tar", "--", revision])
+        .current_dir(workspace)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    let archive_stdout = archive
+        .stdout
+        .take()
+        .ok_or("could not read git archive output")?;
+    let unpack = Command::new("tar")
+        .args(["-x", "-C"])
+        .arg(destination)
+        .stdin(archive_stdout)
+        .output()?;
+    let archive_output = archive.wait_with_output()?;
+    if !archive_output.status.success() || !unpack.status.success() {
+        return Err(format!(
+            "could not archive historical revision {revision}: {}{}",
+            String::from_utf8_lossy(&archive_output.stderr).trim(),
+            String::from_utf8_lossy(&unpack.stderr).trim()
+        )
+        .into());
+    }
+    Ok(())
+}
+
+fn historical_snapshot(
+    workspace: &Path,
+    revision: &str,
+) -> Result<HistoricalSnapshot, Box<dyn Error>> {
+    let started = Instant::now();
+    let temporary = TemporaryWorkspace::new()?;
+    archive_revision(workspace, revision, &temporary.0)?;
+    super::index::run_init(&temporary.0, false)?;
+    let conn = Connection::open(temporary.0.join(".ochna/ochna.db"))?;
+    let graph = graph_snapshot(&conn)?;
+    let temporary_bytes = directory_size(&temporary.0)?;
+    // `temporary` is deliberately dropped here, after all source and DB reads
+    // are complete and before this function returns any data to the caller.
+    drop(conn);
+    drop(temporary);
+    Ok(HistoricalSnapshot {
+        graph,
+        temporary_bytes,
+        elapsed_ms: started.elapsed().as_millis(),
+    })
+}
+
+fn edge_value(edge: &EdgeSnapshot, nodes: &BTreeMap<String, db::Node>, change: &str) -> Value {
+    json!({
+        "source": nodes.get(&edge.key.source_id),
+        "target": nodes.get(&edge.key.target_id),
+        "relationship": edge.key.relationship,
+        "resolution_kind": edge.resolution_kind,
+        "confidence": edge.confidence,
+        "change": change,
+    })
+}
+
 pub fn run_diff(
     workspace: &Path,
     base: Option<&str>,
@@ -230,7 +471,30 @@ pub fn run_diff(
     }
     let conn = Connection::open(db_path)?;
     let (base_out, head_out, files, mut hunks, files_truncated) = if let Some(base) = base {
-        let base_out = resolve_revision(workspace, base)?;
+        let base_out = match resolve_revision(workspace, base) {
+            Ok(revision) => revision,
+            Err(error) => {
+                let message = format!(
+                    "Base revision {base:?} is unavailable locally ({error}). Fetch it before requesting historical deltas; shallow clones may need git fetch --deepen."
+                );
+                if json_mode {
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&json!({
+                            "contract_version": "0.3",
+                            "command": "diff",
+                            "ok": false,
+                            "data": {"base": Value::Null, "head": Value::Null, "files": [], "symbols": [], "edges": [], "newly_unresolved_callers": [], "unmapped_hunks": [], "historical_snapshot": Value::Null},
+                            "warnings": [{"code": "base_revision_unavailable", "message": message}],
+                            "truncated": false,
+                            "next_action": "provide a base revision"
+                        }))?
+                    );
+                    return Ok(());
+                }
+                return Err(message.into());
+            }
+        };
         let head_out = head
             .map(|revision| resolve_revision(workspace, revision))
             .transpose()?;
@@ -258,6 +522,32 @@ pub fn run_diff(
         cap_changed_files(&mut files);
         (None, None, files, Vec::new(), false)
     };
+    let mut warnings = Vec::new();
+    let current_graph = graph_snapshot(&conn)?;
+    let target_history = if let Some(head_out) = head_out.as_deref() {
+        match historical_snapshot(workspace, head_out) {
+            Ok(snapshot) => Some(snapshot),
+            Err(error) => {
+                warnings.push(json!({
+                    "code": "historical_snapshot_unavailable",
+                    "message": format!("The requested --head snapshot is unavailable ({error}). Fetch the revision locally (for a shallow clone, git fetch --deepen) and retry.")
+                }));
+                None
+            }
+        }
+    } else {
+        None
+    };
+    let target_graph = target_history
+        .as_ref()
+        .map(|snapshot| snapshot.graph.clone())
+        .unwrap_or_else(|| current_graph.clone());
+    if base.is_some() && head.is_none() && !current_index_is_fresh(workspace, &conn)? {
+        warnings.push(json!({
+            "code": "current_index_stale",
+            "message": "The worktree-side index is stale, so historical deltas may not describe the current source. Run ochna sync and retry."
+        }));
+    }
     let retained_paths: BTreeSet<_> = files.iter().map(|file| file.path.as_str()).collect();
     hunks.retain(|hunk| retained_paths.contains(hunk.path.as_str()));
     let status_by_path: BTreeMap<_, _> = files
@@ -272,7 +562,7 @@ pub fn run_diff(
         if hunk.new_count > 0 {
             let range_end = hunk.new_start + hunk.new_count - 1;
             let mut matching = false;
-            for node in db::query_nodes(&conn, None, None, Some(&hunk.path))? {
+            for node in nodes_for_path(&target_graph, &hunk.path) {
                 if node.start_line <= range_end && hunk.new_start <= node.end_line {
                     matching = true;
                     let change = if status_by_path.get(hunk.path.as_str()) == Some(&"added") {
@@ -300,7 +590,7 @@ pub fn run_diff(
     }
     if base.is_none() {
         for file in &files {
-            for node in db::query_nodes(&conn, None, None, Some(&file.path))? {
+            for node in nodes_for_path(&target_graph, &file.path) {
                 let change = if file.status == "added" {
                     "added"
                 } else {
@@ -315,47 +605,123 @@ pub fn run_diff(
         // A pure rename has no content hunks. Its current indexed symbols are
         // still changed-path evidence and must not disappear from the review.
         for file in files.iter().filter(|file| file.status == "renamed") {
-            for node in db::query_nodes(&conn, None, None, Some(&file.path))? {
+            for node in nodes_for_path(&target_graph, &file.path) {
                 mapped
                     .entry(node.id.clone())
                     .or_insert_with(|| (node, "modified", BTreeSet::new()));
             }
         }
     }
-    let mut warnings = Vec::new();
-    let mut symbols: Vec<Value> = mapped
-        .values()
-        .map(|(node, change, lines)| json!({"symbol": node, "change": change, "hunks": lines}))
-        .collect();
-    let edges = Vec::<Value>::new();
+    let mut historical_symbols = Vec::<Value>::new();
+    let mut edges = Vec::<Value>::new();
     let deleted_explicit = base.is_none() && files.iter().any(|file| file.status == "deleted");
-    if !removed_hunks.is_empty() || deleted_explicit {
+    let historical = if head.is_some() && target_history.is_none() {
+        None
+    } else if let (Some(_), Some(base_out)) = (base, base_out.as_deref()) {
+        match historical_snapshot(workspace, base_out) {
+            Ok(snapshot) => Some(snapshot),
+            Err(error) => {
+                warnings.push(json!({
+                    "code": "historical_snapshot_unavailable",
+                    "message": format!("Historical deltas are unavailable ({error}). The current-index mapping is preserved; fetch the base object locally (for a shallow clone, git fetch --deepen) and retry.")
+                }));
+                None
+            }
+        }
+    } else {
+        None
+    };
+    let mut historical_metrics = Value::Null;
+    let unresolved = if let Some(historical) = historical.as_ref() {
+        historical_metrics = json!({
+            "base_index": "temporary",
+            "head_index": if target_history.is_some() { "temporary" } else { "current" },
+            "temporary_bytes": historical.temporary_bytes,
+            "elapsed_ms": historical.elapsed_ms,
+            "cleanup": "removed"
+        });
+        for (id, node) in &target_graph.nodes {
+            match historical.graph.nodes.get(id) {
+                None => {
+                    mapped.insert(id.clone(), (node.clone(), "added", BTreeSet::new()));
+                }
+                Some(before) if before != node => {
+                    mapped.insert(id.clone(), (node.clone(), "modified", BTreeSet::new()));
+                }
+                _ => {}
+            }
+        }
+        for (id, node) in &historical.graph.nodes {
+            if !target_graph.nodes.contains_key(id) {
+                historical_symbols.push(json!({"symbol": node, "change": "removed", "hunks": []}));
+            }
+        }
+        for (key, edge) in &target_graph.edges {
+            match historical.graph.edges.get(key) {
+                None => edges.push(edge_value(edge, &target_graph.nodes, "added")),
+                Some(before) if before != edge => {
+                    edges.push(edge_value(edge, &target_graph.nodes, "modified"))
+                }
+                _ => {}
+            }
+        }
+        for (key, edge) in &historical.graph.edges {
+            if !target_graph.edges.contains_key(key) {
+                edges.push(edge_value(edge, &historical.graph.nodes, "removed"));
+            }
+        }
+        target_graph
+            .unresolved
+            .difference(&historical.graph.unresolved)
+            .map(|(source, specifier, reason)| {
+                json!({"source": source, "specifier": specifier, "reason": reason})
+            })
+            .collect()
+    } else {
+        unresolved_for_new_lines(&conn, &mapped.keys().cloned().collect(), &new_lines)?
+    };
+    if historical.is_none() && (!removed_hunks.is_empty() || deleted_explicit) {
         warnings.push(json!({"code":"historical_index_required", "message":"Removed symbols and edges require a historical index; unavailable endpoints are null."}));
         for hunk in removed_hunks {
-            symbols
+            historical_symbols
                 .push(json!({"symbol": Value::Null, "change":"removed", "hunks":[hunk.old_start]}));
         }
         if deleted_explicit {
             for file in files.iter().filter(|file| file.status == "deleted") {
-                symbols.push(json!({"symbol": Value::Null, "change":"removed", "hunks":[], "path":file.path}));
+                historical_symbols.push(json!({"symbol": Value::Null, "change":"removed", "hunks":[], "path":file.path}));
             }
         }
     }
+    let mut symbols: Vec<Value> = mapped
+        .values()
+        .map(|(node, change, lines)| json!({"symbol": node, "change": change, "hunks": lines}))
+        .collect();
+    symbols.append(&mut historical_symbols);
     symbols.sort_by(|left, right| {
         left["symbol"]["id"]
             .as_str()
             .unwrap_or("")
             .cmp(right["symbol"]["id"].as_str().unwrap_or(""))
     });
-    let mut truncated = files_truncated || symbols.len() > limit;
+    edges.sort_by(|left, right| {
+        (
+            left["source"]["id"].as_str().unwrap_or(""),
+            left["target"]["id"].as_str().unwrap_or(""),
+            left["relationship"].as_str().unwrap_or(""),
+        )
+            .cmp(&(
+                right["source"]["id"].as_str().unwrap_or(""),
+                right["target"]["id"].as_str().unwrap_or(""),
+                right["relationship"].as_str().unwrap_or(""),
+            ))
+    });
+    let mut truncated = files_truncated || symbols.len() > limit || edges.len() > limit;
     if symbols.len() > limit {
         symbols.truncate(limit);
     }
-    let source_ids: BTreeSet<_> = symbols
-        .iter()
-        .filter_map(|item| item["symbol"]["id"].as_str().map(str::to_string))
-        .collect();
-    let unresolved = unresolved_for_new_lines(&conn, &source_ids, &new_lines)?;
+    if edges.len() > limit {
+        edges.truncate(limit);
+    }
     let mut unmapped_hunks: Vec<_> = unmapped
         .into_iter()
         .map(|(path, line)| json!({"path":path,"line":line}))
@@ -364,7 +730,7 @@ pub fn run_diff(
         unmapped_hunks.truncate(MAX_CHANGED_FILES);
         truncated = true;
     }
-    let data = json!({"base":base_out,"head":head_out,"files":files.iter().map(|f| json!({"path":f.path,"status":f.status})).collect::<Vec<_>>(),"symbols":symbols,"edges":edges,"newly_unresolved_callers":unresolved,"unmapped_hunks":unmapped_hunks});
+    let data = json!({"base":base_out,"head":head_out,"files":files.iter().map(|f| json!({"path":f.path,"status":f.status})).collect::<Vec<_>>(),"symbols":symbols,"edges":edges,"newly_unresolved_callers":unresolved,"unmapped_hunks":unmapped_hunks,"historical_snapshot":historical_metrics});
     if json_mode {
         println!(
             "{}",
