@@ -8,6 +8,12 @@ A structural code-graph CLI: parses Rust/Go/Java with Tree-sitter, indexes symbo
 
 ## Commands
 
+`.mise.toml` pins rust and uv for this project; `mise install` provisions
+both (`make setup` does this automatically). Every `make` target resolves
+tools through `mise x --` rather than assuming shell activation, since
+`make` spawns a fresh non-interactive shell per recipe line that never
+sources `mise activate`.
+
 - `make build` / `make test` — cargo build (release) / cargo test.
 - `make check` — `fmt` (check) + `clippy -D warnings`. Runs before commits.
 - `make install` — install to `~/.cargo/bin`. Run this to exercise the CLI.

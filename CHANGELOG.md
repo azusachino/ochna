@@ -9,6 +9,42 @@ Each release carries a **Performance** note for indexing-pipeline changes.
 test giants (`make report`); the numbers quoted here are directional and
 machine-dependent.
 
+## [0.3.2] — 2026-07-30
+
+Findings from a self-audit: running `ochna` on its own codebase and reviewing
+`diff`/`db` for the same freshness-duplication and encoding-strictness
+patterns already fixed once in 0.3.1.
+
+### Fixed
+
+- `init`/`sync`'s directory walker (`should_skip_dir`) never skipped
+  `clones/`, unlike the separate `doctor` diagnostic scanner, which already
+  did — the two skip-lists had drifted apart. Running `ochna init` at this
+  repo's own root (the natural way to dogfood the tool on itself) silently
+  indexed all 8 test-giant submodules instead of ochna's own source.
+  `clones` added to the canonical skip-list; the diagnostic scanner now
+  calls the same shared function instead of maintaining its own copy.
+- `diff`'s current-index staleness gate (`current_index_is_fresh`) was a
+  third, independent reimplementation of the freshness check fixed in
+  0.3.1's `indexed_sources_are_fresh` — it had regressed in two ways:
+  comparing file-set sizes instead of actual path sets, and propagating a
+  raw UTF-8 decode error instead of gracefully excusing an unreadable file.
+  Replaced with the shared `indexed_sources_are_fresh`.
+- `ochna diff` crashed on any diff touching non-UTF-8 file content (binary
+  files, or source in a non-UTF-8 encoding): its `git()` helper decoded
+  stdout with strict `String::from_utf8` instead of the lossy decode used
+  everywhere else in the codebase for git output.
+- `search`'s FTS5 query passed raw user input into `MATCH` unescaped. A
+  query containing FTS5 syntax characters (`-`, `"`, `*`, `:`, parens) could
+  be silently reinterpreted as a boolean/phrase/prefix expression instead of
+  literal text — e.g. `my-helper` read as `my AND NOT helper`, excluding the
+  very row that contains both tokens — and the exact-name/`LIKE` fallback
+  only engages when FTS returns zero rows, not a wrongly-filtered nonempty
+  set. Fixed by quoting each whitespace-separated term as its own FTS5
+  phrase rather than the whole query as one phrase, which neutralizes
+  special characters within a term while preserving FTS5's implicit
+  AND-across-terms behavior that legitimate multi-word searches rely on.
+
 ## [0.3.1] — 2026-07-29
 
 ### Fixed

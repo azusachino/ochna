@@ -1,6 +1,6 @@
 [package]
 name = "ochna"
-version = "0.3.1"
+version = "0.3.2"
 edition = "2021"
 description = "A structural code graph indexing and analysis CLI using Tree-sitter and SQLite"
 license = "Apache-2.0"
@@ -14,8 +14,6 @@ exclude = [
     "/java_mock_test",
     "/.ochna",
     "/.github",
-    "/flake.lock",
-    "/flake.nix",
     "/Makefile",
     "/pyproject.toml",
     "/scripts/*.py",

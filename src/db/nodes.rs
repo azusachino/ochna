@@ -197,6 +197,25 @@ pub fn find_callees(
     }
 }
 
+/// Quote each whitespace-separated term as its own FTS5 phrase, doubling any
+/// literal `"` per FTS5's escaping rule. A quoted phrase is literal text to
+/// FTS5's query parser, so special characters within a term (`-` for NOT,
+/// `*` for prefix, `:` for a column filter, parens for grouping) can no
+/// longer be misread as query syntax -- a search for a hyphenated symbol
+/// like `my-helper` no longer gets silently reinterpreted as `my AND NOT
+/// helper`. Quoting per-term rather than the whole query preserves FTS5's
+/// implicit AND-across-terms behavior for legitimate multi-word searches
+/// (e.g. matching a doc comment containing "process" and "request" without
+/// requiring them adjacent), which wrapping the entire input in one phrase
+/// would have broken.
+fn fts5_safe_query(query_str: &str) -> String {
+    query_str
+        .split_whitespace()
+        .map(|term| format!("\"{}\"", term.replace('"', "\"\"")))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 /// Full-text search on nodes via nodes_fts
 pub fn search_nodes_fts(conn: &Connection, query_str: &str) -> rusqlite::Result<Vec<Node>> {
     let mut stmt = conn.prepare(
@@ -208,7 +227,7 @@ pub fn search_nodes_fts(conn: &Connection, query_str: &str) -> rusqlite::Result<
          WHERE nodes_fts MATCH ? \
          ORDER BY rank",
     )?;
-    let mut rows = stmt.query([query_str])?;
+    let mut rows = stmt.query([fts5_safe_query(query_str)])?;
     let mut nodes = Vec::new();
     while let Some(row) = rows.next()? {
         nodes.push(map_row_to_node(row)?);
