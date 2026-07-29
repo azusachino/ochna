@@ -9,6 +9,20 @@ Each release carries a **Performance** note for indexing-pipeline changes.
 test giants (`make report`); the numbers quoted here are directional and
 machine-dependent.
 
+## [0.3.1] — 2026-07-29
+
+### Fixed
+
+- `status --json` freshness (`classify_freshness`) was git-porcelain-based:
+  any git-dirty file anywhere in the workspace forced `freshness: "stale"`,
+  even when the file was already reflected in the index and unrelated to
+  ochna's own tracking. `doctor` already computed freshness correctly (per
+  indexed-file content hash vs. disk); `status` now shares that same
+  `indexed_sources_are_fresh` check instead of its own git-state comparison.
+  A git-dirty workspace can be `status --json`-fresh immediately after
+  `init`/`sync` as long as indexed content matches disk. Removed the now-dead
+  `Freshness::Unknown` variant along with the git-comparison path it served.
+
 ## [0.3.0] — 2026-07-29
 
 Turns ochna from a fast symbol-lookup index into a diff-aware structural

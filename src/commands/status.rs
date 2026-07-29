@@ -22,7 +22,6 @@ struct FileRow {
 enum Freshness {
     Fresh,
     Stale,
-    Unknown,
 }
 
 const LOW_QUALITY_MIN_CALLS: i64 = 5;
@@ -56,7 +55,6 @@ impl Freshness {
         match self {
             Freshness::Fresh => "fresh",
             Freshness::Stale => "stale",
-            Freshness::Unknown => "unknown",
         }
     }
 }
@@ -94,28 +92,6 @@ fn read_schema_version(conn: &Connection) -> Option<i64> {
     })
     .ok()
     .flatten()
-}
-
-fn classify_freshness(
-    indexed_sha: &str,
-    indexed_status: &str,
-    head_sha: Option<&str>,
-    working_tree: Option<&str>,
-) -> Freshness {
-    let Some(head_sha) = head_sha else {
-        return Freshness::Unknown;
-    };
-    let Some(working_tree) = working_tree else {
-        return Freshness::Unknown;
-    };
-    if indexed_sha == "N/A" || indexed_sha.is_empty() {
-        return Freshness::Unknown;
-    }
-    if indexed_sha == head_sha && indexed_status == "clean" && working_tree == "clean" {
-        Freshness::Fresh
-    } else {
-        Freshness::Stale
-    }
 }
 
 /// The `status` command:
@@ -172,12 +148,15 @@ pub fn run_status(workspace: &Path, json: bool) -> Result<(), Box<dyn Error>> {
     let schema_match = found_schema == Some(db::SCHEMA_VERSION);
     let head_sha = live_git_head(workspace);
     let working_tree = live_git_status(workspace);
-    let freshness = classify_freshness(
-        &git_commit_sha,
-        &git_status,
-        head_sha.as_deref(),
-        working_tree.as_deref(),
-    );
+    // Freshness is structural (matches `doctor`): it compares each indexed
+    // file's content hash against disk, not git commit/dirty state. A git-dirty
+    // file elsewhere in the workspace does not make an unrelated, already-synced
+    // index stale.
+    let freshness = if indexed_sources_are_fresh(&conn, workspace)? {
+        Freshness::Fresh
+    } else {
+        Freshness::Stale
+    };
     let ok = schema_match && nodes_count > 0 && freshness != Freshness::Stale;
     let action = if !schema_match || nodes_count == 0 {
         "ochna init"
