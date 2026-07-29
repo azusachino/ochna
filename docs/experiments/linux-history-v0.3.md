@@ -29,7 +29,7 @@ boundary without silently substituting the worktree graph or deepening the
 checkout.
 
 Successful deletion-heavy graph comparison is covered by the deterministic C
-fixture in `pyscripts/verify_clis.py`: it removes three symbols and at least two
+fixture in `scripts/verify_clis.py`: it removes three symbols and at least two
 edges, reports temporary-index cost, and verifies cleanup. A successful
 full-Linux parent-to-merge comparison remains conditional on both revisions
 already being available locally.

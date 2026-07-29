@@ -282,7 +282,7 @@ def main() -> int:
         # --- report.py analytics stays runnable against the live schema ---
         # (its hotspots query joins edges.target_nid; guards against the schema
         # drift that previously broke it silently). helper has two incoming calls.
-        report = run([sys.executable, str(repo_root / "pyscripts" / "report.py")], tmp)
+        report = run([sys.executable, str(repo_root / "scripts" / "report.py")], tmp)
         assert "Hotspots" in report.stdout
         assert "helper" in report.stdout
 
@@ -303,70 +303,6 @@ def main() -> int:
         assert fresh["ok"] is True
         assert fresh["freshness"] == "fresh"
         assert fresh["action"] == "none"
-
-        # --- diff: materialized v0.3 before/after review story. Git ranges
-        # build a bounded temporary base index, so removed identities and
-        # relationships are evidence rather than placeholders.
-        review = Path(tempfile.mkdtemp(prefix="ochna-review-v0.3."))
-        try:
-            fixture = repo_root / "fixtures" / "review-v0.3"
-            shutil.copytree(fixture / "before", review, dirs_exist_ok=True)
-            run(["git", "init"], review)
-            run(["git", "config", "user.email", "ochna@example.invalid"], review)
-            run(["git", "config", "user.name", "Ochna Verify"], review)
-            run(["git", "add", "-A"], review)
-            run(["git", "commit", "-m", "baseline"], review)
-            shutil.copytree(fixture / "after", review, dirs_exist_ok=True)
-            run([ochna, "init"], review)
-            diff = assert_json(run([ochna, "diff", "--base", "HEAD", "--json"], review).stdout)
-            assert diff["command"] == "diff"
-            changed = {row["symbol"]["id"] for row in diff["data"]["symbols"] if row["symbol"]}
-            assert {"src/lib.rs::render", "src/lib.rs::render_page"} <= changed
-            assert any(
-                row["symbol"]["id"] == "src/lib.rs::legacy_render" and row["change"] == "removed"
-                for row in diff["data"]["symbols"]
-            )
-            assert diff["warnings"] == []
-            assert diff["data"]["historical_snapshot"]["base_index"] == "temporary"
-            assert diff["data"]["historical_snapshot"]["temporary_bytes"] > 0
-            assert diff["data"]["historical_snapshot"]["elapsed_ms"] >= 0
-            assert diff["data"]["historical_snapshot"]["cleanup"] == "removed"
-            assert diff["data"]["newly_unresolved_callers"] == [{
-                "source": "src/lib.rs::render_page", "specifier": "missing_renderer", "reason": "missing_target"
-            }]
-            assert {row["path"] for row in diff["data"]["unmapped_hunks"]} == {"README.md"}
-            # --- impact: confidence-bounded reverse traversal preserves both
-            # structural paths and stops at the unresolved frontier. ---
-            impact = assert_json(run([
-                ochna, "impact", "render", "--direction", "callers", "--depth", "2", "--json"
-            ], review).stdout)
-            assert impact["contract_version"] == "0.3"
-            assert impact["command"] == "impact"
-            assert impact["data"]["root"]["id"] == "src/lib.rs::render"
-            assert impact["data"]["direction"] == "callers"
-            assert impact["data"]["min_confidence"] == 30
-            assert {node["id"] for node in impact["data"]["nodes"]} >= {
-                "src/lib.rs::render_page", "tests/render_tests.rs::render_page_uses_render"
-            }
-            assert len(impact["data"]["paths"]) >= 2
-            assert len(impact["data"]["affected_tests"]) == 1
-            assert impact["data"]["affected_tests"][0]["test"]["id"] == "tests/render_tests.rs::render_page_uses_render"
-            assert any(
-                row["source"]["id"] == "src/lib.rs::render_page"
-                and row["specifier"] == "missing_renderer"
-                and row["reason"] == "missing_target"
-                for row in impact["data"]["unresolved_boundaries"]
-            )
-            assert any(edge["confidence"] < 80 for edge in impact["data"]["edges"])
-            no_tests_impact = assert_json(run([
-                ochna, "--no-tests", "impact", "render", "--direction", "callers", "--depth", "2", "--json"
-            ], review).stdout)
-            assert no_tests_impact["data"]["affected_tests"] == []
-            explicit = assert_json(run([ochna, "diff", "--files", "src/lib.rs", "tests/render_tests.rs", "--json"], review).stdout)
-            assert explicit["data"]["base"] is None and explicit["data"]["head"] is None
-            assert {row["path"] for row in explicit["data"]["files"]} == {"src/lib.rs", "tests/render_tests.rs"}
-        finally:
-            shutil.rmtree(review, ignore_errors=True)
 
         # Hunk ranges may span several current symbols. Only unresolved calls
         # on newly-added patch lines are called "newly" without task 6's

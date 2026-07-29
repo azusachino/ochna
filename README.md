@@ -1,5 +1,10 @@
 # ochna 🌳
 
+[![Crates.io](https://img.shields.io/crates/v/ochna.svg)](https://crates.io/crates/ochna)
+[![Downloads](https://img.shields.io/crates/d/ochna.svg)](https://crates.io/crates/ochna)
+[![CI](https://github.com/azusachino/ochna/actions/workflows/ci.yml/badge.svg)](https://github.com/azusachino/ochna/actions/workflows/ci.yml)
+[![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
+
 `ochna` is a local codebase intelligence CLI. It recursively parses **Rust**, **Go**, **Java**, **C**, **C++**, and **Zig** source files using Tree-sitter ASTs, indexes symbols and call edges into a local SQLite database, and provides high-performance search and dependency-graph queries with minimal overhead.
 
 ---
@@ -73,6 +78,15 @@ binary and asserts behavior, not just exit codes):
 ```bash
 make verify-clis
 ```
+
+---
+
+## 🤝 Contributing
+
+Issues and PRs are welcome. `AGENTS.md` documents project conventions, the
+command surface, and the test giants used as real-world index targets; `make
+check` (fmt + clippy) and `make validate` (check + CLI smoke tests) are the
+gates a PR needs to pass.
 
 ---
 

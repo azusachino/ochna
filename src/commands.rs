@@ -9,8 +9,8 @@ mod query;
 mod status;
 
 pub use diff::run_diff;
-pub(crate) use index::discover_source_files;
 pub use index::run_init;
+pub(crate) use index::{discover_source_files, language_for_path};
 pub(crate) use query::run_impact;
 pub use query::{
     run_callees, run_callers, run_explore, run_howto, run_node, run_search, run_tests_for,
@@ -316,6 +316,50 @@ mod tests {
         fs::write(temp_workspace.join("main.rs"), "fn second() {}\n").unwrap();
         let err = run_status(&temp_workspace, true).unwrap_err();
         assert!(err.to_string().contains("ochna sync"));
+
+        // Clean up temporary workspace
+        fs::remove_dir_all(&temp_workspace).unwrap();
+    }
+
+    #[test]
+    fn test_status_json_fresh_immediately_after_init_on_dirty_worktree() {
+        let temp_workspace = create_temp_dir();
+        fs::write(temp_workspace.join(".gitignore"), ".ochna\n").unwrap();
+        fs::write(temp_workspace.join("main.rs"), "fn first() {}\n").unwrap();
+
+        std::process::Command::new("git")
+            .args(["init"])
+            .current_dir(&temp_workspace)
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["config", "user.email", "ochna@example.invalid"])
+            .current_dir(&temp_workspace)
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["config", "user.name", "Ochna Test"])
+            .current_dir(&temp_workspace)
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["add", ".gitignore", "main.rs"])
+            .current_dir(&temp_workspace)
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["commit", "-m", "test baseline"])
+            .current_dir(&temp_workspace)
+            .output()
+            .unwrap();
+
+        // Change main.rs on disk without committing, so the working tree is
+        // git-dirty relative to HEAD *before* indexing. init/status must
+        // still report fresh right after, because ochna's freshness is
+        // "does the index match disk", not "is the git working tree clean".
+        fs::write(temp_workspace.join("main.rs"), "fn second() {}\n").unwrap();
+        run_init(&temp_workspace, false).unwrap();
+        run_status(&temp_workspace, true).unwrap();
 
         fs::remove_dir_all(&temp_workspace).unwrap();
     }

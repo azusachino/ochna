@@ -1,6 +1,9 @@
 //! Read-only inspection commands: `status` (counts + git baseline) and `files`.
 
-use crate::{commands::discover_source_files, db};
+use crate::{
+    commands::{discover_source_files, language_for_path},
+    db, parser,
+};
 use rusqlite::Connection;
 use serde_json::json;
 use std::collections::{BTreeMap, BTreeSet};
@@ -22,7 +25,6 @@ struct FileRow {
 enum Freshness {
     Fresh,
     Stale,
-    Unknown,
 }
 
 const LOW_QUALITY_MIN_CALLS: i64 = 5;
@@ -56,7 +58,6 @@ impl Freshness {
         match self {
             Freshness::Fresh => "fresh",
             Freshness::Stale => "stale",
-            Freshness::Unknown => "unknown",
         }
     }
 }
@@ -94,28 +95,6 @@ fn read_schema_version(conn: &Connection) -> Option<i64> {
     })
     .ok()
     .flatten()
-}
-
-fn classify_freshness(
-    indexed_sha: &str,
-    indexed_status: &str,
-    head_sha: Option<&str>,
-    working_tree: Option<&str>,
-) -> Freshness {
-    let Some(head_sha) = head_sha else {
-        return Freshness::Unknown;
-    };
-    let Some(working_tree) = working_tree else {
-        return Freshness::Unknown;
-    };
-    if indexed_sha == "N/A" || indexed_sha.is_empty() {
-        return Freshness::Unknown;
-    }
-    if indexed_sha == head_sha && indexed_status == "clean" && working_tree == "clean" {
-        Freshness::Fresh
-    } else {
-        Freshness::Stale
-    }
 }
 
 /// The `status` command:
@@ -172,12 +151,15 @@ pub fn run_status(workspace: &Path, json: bool) -> Result<(), Box<dyn Error>> {
     let schema_match = found_schema == Some(db::SCHEMA_VERSION);
     let head_sha = live_git_head(workspace);
     let working_tree = live_git_status(workspace);
-    let freshness = classify_freshness(
-        &git_commit_sha,
-        &git_status,
-        head_sha.as_deref(),
-        working_tree.as_deref(),
-    );
+    // Freshness is structural (matches `doctor`): it compares each indexed
+    // file's content hash against disk, not git commit/dirty state. A git-dirty
+    // file elsewhere in the workspace does not make an unrelated, already-synced
+    // index stale.
+    let freshness = if indexed_sources_are_fresh(&conn, workspace)? {
+        Freshness::Fresh
+    } else {
+        Freshness::Stale
+    };
     let ok = schema_match && nodes_count > 0 && freshness != Freshness::Stale;
     let action = if !schema_match || nodes_count == 0 {
         "ochna init"
@@ -357,9 +339,33 @@ fn indexed_sources_are_fresh(conn: &Connection, workspace: &Path) -> rusqlite::R
         .map(|path| path.to_string_lossy().into_owned())
         .collect();
     let indexed_paths: BTreeSet<String> = indexed.iter().map(|(path, _)| path.clone()).collect();
-    if discovered != indexed_paths {
+
+    // An indexed file deleted from disk (no longer discovered) is real staleness.
+    if indexed_paths.difference(&discovered).next().is_some() {
         return Ok(false);
     }
+    // A file that's discovered (matches a supported extension) but was never
+    // indexed is only real staleness if re-running the actual indexing
+    // pipeline (read -> resolve language -> parse) on it now would succeed.
+    // index.rs silently skips a file at any of those three steps -- non-UTF-8
+    // content, an extension it can't map to a grammar, or a parser error --
+    // and would skip it identically on every future sync. Re-deciding with
+    // the same pipeline `run_init`/`run_sync` use (rather than special-casing
+    // just one failure mode, e.g. only readability) keeps freshness truthful
+    // for whichever step actually fails, not just the one already observed.
+    let missing_is_stale = discovered.difference(&indexed_paths).any(|path| {
+        let Some(language) = language_for_path(Path::new(path)) else {
+            return false;
+        };
+        let Ok(content) = fs::read_to_string(workspace.join(path)) else {
+            return false;
+        };
+        parser::parse_code(path, &content, language).is_ok()
+    });
+    if missing_is_stale {
+        return Ok(false);
+    }
+
     Ok(indexed.into_iter().all(|(path, hash)| {
         fs::read_to_string(workspace.join(path))
             .map(|content| calculate_content_hash(&content) == hash)
@@ -751,6 +757,35 @@ mod diagnostics_tests {
         assert!(!indexed_sources_are_fresh(&conn, &workspace).unwrap());
         fs::remove_file(workspace.join("src/new.rs")).unwrap();
         fs::write(workspace.join("src/lib.rs"), "fn changed() {}\n").unwrap();
+        assert!(!indexed_sources_are_fresh(&conn, &workspace).unwrap());
+        fs::remove_dir_all(workspace).unwrap();
+    }
+
+    #[test]
+    fn indexed_sources_are_fresh_excuses_unreadable_non_utf8_files() {
+        let workspace = workspace();
+        fs::write(workspace.join("src/lib.rs"), "pub fn helper() {}\n").unwrap();
+        // A supported-extension file that isn't valid UTF-8 (e.g. a legacy
+        // Latin-1 header) is discovered by the file walker but silently
+        // skipped by the indexer's `fs::read_to_string`. It must not make
+        // the workspace permanently "stale": there's no sync that could ever
+        // make it readable.
+        fs::write(
+            workspace.join("src/legacy.rs"),
+            [0x66, 0x6e, 0x20, 0xff, 0xfe],
+        )
+        .unwrap();
+        run_init(&workspace, false).unwrap();
+
+        let conn = Connection::open(workspace.join(".ochna/ochna.db")).unwrap();
+        let indexed_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM files", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(indexed_count, 1, "the non-UTF-8 file must not be indexed");
+        assert!(indexed_sources_are_fresh(&conn, &workspace).unwrap());
+
+        // A genuinely missing (but readable) file is still real staleness.
+        fs::write(workspace.join("src/added.rs"), "pub fn added() {}\n").unwrap();
         assert!(!indexed_sources_are_fresh(&conn, &workspace).unwrap());
         fs::remove_dir_all(workspace).unwrap();
     }

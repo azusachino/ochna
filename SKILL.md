@@ -73,13 +73,13 @@ For custom queries or advanced analytics directly from the SQLite database:
 
 - **Generate Structured Report**:
   ```bash
-  uv run python pyscripts/report.py
+  uv run python scripts/report.py
   ```
   _This runs under Python 3.14 and directly extracts file distributions, symbol counts, and hot call sites using `sqlite3` without invoking the binary._
 
 - **Explain a GitHub PR against an indexed checkout**:
   ```bash
-  uv run python pyscripts/pr_feature_report.py --workspace clones/kubernetes --repo kubernetes/kubernetes --pr 139848
+  uv run python scripts/pr_feature_report.py --workspace clones/kubernetes --repo kubernetes/kubernetes --pr 139848
   ```
   _Use this for large benchmark submodules where local history may be shallow. It reads PR metadata and changed files with `gh api`, then reads symbols from the local `.ochna/ochna.db`._
 

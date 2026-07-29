@@ -1,14 +1,17 @@
 [submodule "clones/tokio"]
 	path = clones/tokio
 	url = https://github.com/tokio-rs/tokio.git
+	shallow = true
 	ignore = dirty
 [submodule "clones/netty"]
 	path = clones/netty
 	url = https://github.com/netty/netty.git
+	shallow = true
 	ignore = dirty
 [submodule "clones/kubernetes"]
 	path = clones/kubernetes
 	url = https://github.com/kubernetes/kubernetes.git
+	shallow = true
 	ignore = dirty
 [submodule "clones/linux"]
 	path = clones/linux
@@ -23,5 +26,15 @@
 [submodule "clones/spring-petclinic"]
 	path = clones/spring-petclinic
 	url = https://github.com/spring-projects/spring-petclinic.git
+	shallow = true
+	ignore = dirty
+[submodule "clones/ghostty"]
+	path = clones/ghostty
+	url = https://github.com/ghostty-org/ghostty.git
+	shallow = true
+	ignore = dirty
+[submodule "clones/flink"]
+	path = clones/flink
+	url = https://github.com/apache/flink.git
 	shallow = true
 	ignore = dirty
