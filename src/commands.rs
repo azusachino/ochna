@@ -7,6 +7,7 @@ mod index;
 mod query;
 mod status;
 
+pub(crate) use index::discover_source_files;
 pub use index::run_init;
 pub use query::{run_callees, run_callers, run_explore, run_howto, run_node, run_search};
 pub use status::{run_doctor, run_files, run_status, run_unresolved};

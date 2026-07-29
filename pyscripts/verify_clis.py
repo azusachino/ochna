@@ -130,6 +130,27 @@ def main() -> int:
         assert dirty_doctor["warnings"][0]["code"] == "dirty_worktree"
         (tmp / "README.md").unlink()
 
+        # A newly added supported source is stale even before Git commits it.
+        (tmp / "src" / "added.rs").write_text("pub fn added() {}\n", encoding="utf-8")
+        added_source = run([ochna, "doctor", "--json"], tmp, check=False)
+        assert added_source.returncode != 0
+        added_source_json = assert_json(added_source.stdout)
+        assert added_source_json["data"]["freshness"] == "stale"
+        assert added_source_json["next_action"] == "ochna sync"
+        (tmp / "src" / "added.rs").unlink()
+
+        # Unsupported source formats require review without an impossible action.
+        (tmp / "unsupported.py").write_text("def unsupported(): pass\n", encoding="utf-8")
+        quality_degraded = run([ochna, "doctor", "--json"], tmp, check=False)
+        assert quality_degraded.returncode != 0
+        quality_json = assert_json(quality_degraded.stdout)
+        assert quality_json["data"]["freshness"] == "fresh"
+        assert quality_json["data"]["graph_quality"]["trust_verdict"] == "degraded"
+        assert quality_json["next_action"] == "none"
+        assert "Graph quality is degraded" in quality_degraded.stderr
+        assert "Run 'none'" not in quality_degraded.stderr
+        (tmp / "unsupported.py").unlink()
+
         # --- status --json preflight verdict: fresh index is ok ---
         status = assert_json(run([ochna, "status", "--json"], tmp).stdout)
         assert status["ok"] is True

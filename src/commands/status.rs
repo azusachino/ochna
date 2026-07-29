@@ -1,6 +1,6 @@
 //! Read-only inspection commands: `status` (counts + git baseline) and `files`.
 
-use crate::db;
+use crate::{commands::discover_source_files, db};
 use rusqlite::Connection;
 use serde_json::json;
 use std::collections::{BTreeMap, BTreeSet};
@@ -362,6 +362,16 @@ fn indexed_sources_are_fresh(conn: &Connection, workspace: &Path) -> rusqlite::R
     if indexed.is_empty() {
         return Ok(false);
     }
+    let discovered = discover_source_files(workspace)
+        .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
+    let discovered: BTreeSet<String> = discovered
+        .into_iter()
+        .map(|path| path.to_string_lossy().into_owned())
+        .collect();
+    let indexed_paths: BTreeSet<String> = indexed.iter().map(|(path, _)| path.clone()).collect();
+    if discovered != indexed_paths {
+        return Ok(false);
+    }
     Ok(indexed.into_iter().all(|(path, hash)| {
         fs::read_to_string(workspace.join(path))
             .map(|content| calculate_content_hash(&content) == hash)
@@ -621,6 +631,8 @@ pub fn run_doctor(workspace: &Path, json_mode: bool) -> Result<(), Box<dyn Error
     }
     if ok {
         Ok(())
+    } else if graph_degraded && freshness == Freshness::Fresh {
+        Err("Graph quality is degraded; review low-quality locations and unsupported source extensions.".into())
     } else {
         Err(format!("Graph trust is {verdict}. Run '{next_action}'.").into())
     }
@@ -747,6 +759,9 @@ mod diagnostics_tests {
         assert!(indexed_sources_are_fresh(&conn, &workspace).unwrap());
         fs::write(workspace.join("README.md"), "dirty but non-structural\n").unwrap();
         assert!(indexed_sources_are_fresh(&conn, &workspace).unwrap());
+        fs::write(workspace.join("src/new.rs"), "fn added() {}\n").unwrap();
+        assert!(!indexed_sources_are_fresh(&conn, &workspace).unwrap());
+        fs::remove_file(workspace.join("src/new.rs")).unwrap();
         fs::write(workspace.join("src/lib.rs"), "fn changed() {}\n").unwrap();
         assert!(!indexed_sources_are_fresh(&conn, &workspace).unwrap());
         fs::remove_dir_all(workspace).unwrap();

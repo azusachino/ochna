@@ -56,6 +56,16 @@ fn scan_dir(
     Ok(())
 }
 
+/// Return the workspace-relative source files handled by the indexer. Read-only
+/// consumers such as `doctor` use this so freshness cannot drift from indexing
+/// discovery or its ignore policy.
+pub(crate) fn discover_source_files(workspace: &Path) -> std::io::Result<Vec<PathBuf>> {
+    let mut files = Vec::new();
+    scan_dir(workspace, workspace, &mut files, false)?;
+    files.sort();
+    Ok(files)
+}
+
 fn should_skip_dir(file_name: &str, include_library: bool) -> bool {
     if file_name == ".git" || file_name == ".ochna" {
         return true;
