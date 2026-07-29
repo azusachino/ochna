@@ -28,3 +28,13 @@
 	url = https://github.com/spring-projects/spring-petclinic.git
 	shallow = true
 	ignore = dirty
+[submodule "clones/ghostty"]
+	path = clones/ghostty
+	url = https://github.com/ghostty-org/ghostty.git
+	shallow = true
+	ignore = dirty
+[submodule "clones/flink"]
+	path = clones/flink
+	url = https://github.com/apache/flink.git
+	shallow = true
+	ignore = dirty

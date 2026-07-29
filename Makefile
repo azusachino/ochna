@@ -3,7 +3,7 @@
 
 .DEFAULT_GOAL := help
 
-.PHONY: help all build test fmt fmt-fix lint check validate verify-clis verify_clis setup install report clean
+.PHONY: help all build test fmt fmt-fix lint check validate verify-clis verify_clis setup install report case-sim clean
 
 help:
 	@echo "Usage: make <target>"
@@ -16,6 +16,7 @@ help:
 	@echo "  setup        Shallow-clone submodules and build ochna"
 	@echo "  install      Install ochna to ~/.cargo/bin"
 	@echo "  report       Index test giants and write BENCHMARK.md"
+	@echo "  case-sim     Check determined vs actual state against known real-world cases"
 	@echo "  clean        Remove Cargo build artifacts"
 
 all: build
@@ -62,6 +63,12 @@ install:
 # regression shows up as a count delta. Use REINDEX=1 to force a clean re-index.
 report: build
 	uv run python scripts/benchmark_report.py
+
+# Determined-state (ochna's output) vs actual-state (documented ground truth
+# from real historical PRs) checks against the test giants. Catches parser/
+# resolution regressions that synthetic fixtures wouldn't.
+case-sim: build
+	uv run python scripts/case_simulation.py
 
 clean:
 	cargo clean

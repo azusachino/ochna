@@ -12,6 +12,8 @@ A structural code-graph CLI: parses Rust/Go/Java with Tree-sitter, indexes symbo
 - `make check` — `fmt` (check) + `clippy -D warnings`. Runs before commits.
 - `make install` — install to `~/.cargo/bin`. Run this to exercise the CLI.
 - `make setup` — init submodules, uv venv, build, index the `clones/`.
+- `make report` — index every checked-out test giant and append a dated run to `BENCHMARK.md`.
+- `make case-sim` — determined-state (`ochna` output) vs actual-state (documented ground truth from real historical PRs) checks against the test giants; catches regressions synthetic fixtures wouldn't.
 
 ## Using ochna itself
 
@@ -23,5 +25,5 @@ A structural code-graph CLI: parses Rust/Go/Java with Tree-sitter, indexes symbo
 
 ## Test giants
 
-`clones/tokio` (Rust), `clones/netty` (Java), `clones/kubernetes` (Go), `clones/linux` (C), and `clones/zig` (Zig/C/C++) are git submodules used as real-world index targets and benchmark baselines.
+`clones/tokio` (Rust), `clones/netty` (Java), `clones/kubernetes` (Go), `clones/linux` (C), `clones/zig` (Zig/C/C++), `clones/spring-petclinic` (Java/Spring), `clones/ghostty` (Zig/C, a real terminal application rather than a compiler), and `clones/flink` (Java, large multi-module Maven build) are git submodules used as real-world index targets and benchmark baselines.
 They intentionally stay as submodules; `.gitmodules` uses `ignore = dirty` so generated/untracked files inside the clones do not pollute parent `git status`, while recorded submodule commit changes still show up.

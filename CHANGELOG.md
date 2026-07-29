@@ -22,6 +22,29 @@ machine-dependent.
   A git-dirty workspace can be `status --json`-fresh immediately after
   `init`/`sync` as long as indexed content matches disk. Removed the now-dead
   `Freshness::Unknown` variant along with the git-comparison path it served.
+- `indexed_sources_are_fresh` (shared by `status`/`doctor`) treated *any*
+  discovered-but-unindexed file as staleness. A file that fails at any step
+  of the indexing pipeline -- non-UTF-8 content, an extension `index.rs`
+  can't map to a grammar, or a genuine parser error -- is silently skipped
+  by `init`/`sync` and would fail identically on every future sync, so it
+  could never actually resolve to `ok: true` no matter how many times it was
+  synced. The freshness check now re-runs the same read -> resolve-language
+  -> parse pipeline `run_init`/`run_sync` use, rather than special-casing one
+  failure mode (e.g. just readability), so it stays correct for whichever
+  step fails. Found via `clones/zig`, which has 2 legacy Latin-1
+  (non-UTF-8) headers vendored from libc.
+
+### Added
+
+- `clones/ghostty` (Zig/C terminal application) and `clones/flink` (Java,
+  large multi-module Maven build) as test-giant submodules, diversifying
+  coverage beyond a Zig compiler and a single-library Java networking stack.
+- `scripts/case_simulation.py` (`make case-sim`): formalizes the manual
+  acceptance runs in `docs/experiments/v0.3-acceptance-{netty,kubernetes,
+  linux}.md` into repeatable assertions of ochna's determined state against
+  documented actual state from real historical PRs, plus a doctor/status
+  smoke check for every other giant (including new ones with no known-answer
+  case yet). This is what surfaced the `indexed_sources_are_fresh` bug above.
 
 ## [0.3.0] — 2026-07-29
 

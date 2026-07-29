@@ -94,7 +94,7 @@ fn is_test_path(path: &Path) -> bool {
     segments.windows(2).any(|pair| pair == ["src", "test"])
 }
 
-fn language_for_path(path: &Path) -> Option<&'static str> {
+pub(crate) fn language_for_path(path: &Path) -> Option<&'static str> {
     let ext = path.extension()?.to_string_lossy().to_lowercase();
     match ext.as_str() {
         "rs" => Some("rust"),

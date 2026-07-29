@@ -40,6 +40,8 @@ GIANTS = {
     "kubernetes": "Go",
     "linux": "C",
     "zig": "Zig",
+    "ghostty": "Zig/C",
+    "flink": "Java",
 }
 
 
