@@ -38,9 +38,11 @@ jobs:
           - target: aarch64-apple-darwin
             os: macos-latest
             artifact_name: ochna-macos-aarch64
+            toolchain: stable-aarch64-apple-darwin
           - target: x86_64-unknown-linux-musl
             os: ubuntu-latest
             artifact_name: ochna-linux-x86_64
+            toolchain: stable-x86_64-unknown-linux-gnu
 
     steps:
       - name: Checkout repository
@@ -48,9 +50,22 @@ jobs:
         with:
           submodules: recursive
 
+      # macos-latest runners come with rustup pre-installed, so
+      # dtolnay/rust-toolchain's own rustup-install step is skipped and it
+      # only adds `targets:` as an extra cross-target -- it does not force
+      # the *active* toolchain's host to match the runner's actual hardware.
+      # If the pre-installed default toolchain's host was ever
+      # x86_64-apple-darwin (e.g. a legacy image default) while the runner
+      # hardware is arm64, build-script binaries (always host-compiled) come
+      # out x86_64 and fail with "cannot execute binary file" -- GitHub's
+      # arm64 macOS runners don't guarantee Rosetta 2 is installed. Pinning
+      # `toolchain:` to the host-qualified name (not bare `stable`) forces
+      # rustup to install/select a toolchain whose host actually matches the
+      # runner, for both legs, rather than trusting an implicit default.
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: ${{ matrix.toolchain }}
           targets: ${{ matrix.target }}
 
       # x86_64-unknown-linux-musl is the one real cross-compile here (glibc

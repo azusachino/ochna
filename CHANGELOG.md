@@ -9,6 +9,29 @@ Each release carries a **Performance** note for indexing-pipeline changes.
 test giants (`make report`); the numbers quoted here are directional and
 machine-dependent.
 
+## [0.3.3] — 2026-07-30
+
+### Fixed
+
+- The macOS release leg still failed after 0.3.2 dropped `cargo-zigbuild` —
+  a different bug from the one that fix targeted. `macos-latest` runners
+  come with rustup pre-installed, so `dtolnay/rust-toolchain`'s own install
+  step is skipped and it only adds `targets:` as an extra cross-target; it
+  never forces the *active* toolchain's host to match the runner's actual
+  hardware. The pre-installed default toolchain's host was `x86_64-apple-
+  darwin` while the runner hardware is arm64, so build-script binaries
+  (always host-compiled) came out x86_64 and failed to execute at all
+  ("cannot execute binary file") — GitHub's arm64 macOS runners don't
+  guarantee Rosetta 2 is installed. Fixed by pinning `toolchain:` to the
+  host-qualified name (`stable-aarch64-apple-darwin` /
+  `stable-x86_64-unknown-linux-gnu`) for both release legs instead of bare
+  `stable`, forcing rustup to select a toolchain whose host actually
+  matches the runner rather than trusting an implicit pre-installed
+  default.
+- v0.3.2's GitHub release only got the Linux binary uploaded (crates.io
+  publish succeeded and can't be republished under the same version); this
+  release supersedes it with both platforms.
+
 ## [0.3.2] — 2026-07-30
 
 Findings from a self-audit: running `ochna` on its own codebase and reviewing
