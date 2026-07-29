@@ -2,9 +2,82 @@ pub mod commands;
 pub mod db;
 pub mod parser;
 
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use std::error::Error;
 use std::path::PathBuf;
+
+fn parse_unresolved_limit(value: &str) -> Result<usize, String> {
+    let limit = value
+        .parse::<usize>()
+        .map_err(|_| "limit must be a positive integer".to_string())?;
+    if (1..=200).contains(&limit) {
+        Ok(limit)
+    } else {
+        Err("limit must be between 1 and 200".to_string())
+    }
+}
+
+fn parse_tests_for_limit(value: &str) -> Result<usize, String> {
+    let limit = value
+        .parse::<usize>()
+        .map_err(|_| "limit must be a positive integer".to_string())?;
+    if (1..=100).contains(&limit) {
+        Ok(limit)
+    } else {
+        Err("limit must be between 1 and 100".to_string())
+    }
+}
+
+fn parse_diff_limit(value: &str) -> Result<usize, String> {
+    let limit = value
+        .parse::<usize>()
+        .map_err(|_| "limit must be a positive integer".to_string())?;
+    if (1..=500).contains(&limit) {
+        Ok(limit)
+    } else {
+        Err("limit must be between 1 and 500".to_string())
+    }
+}
+
+fn parse_impact_limit(value: &str) -> Result<usize, String> {
+    let limit = value
+        .parse::<usize>()
+        .map_err(|_| "limit must be a positive integer".to_string())?;
+    if (1..=200).contains(&limit) {
+        Ok(limit)
+    } else {
+        Err("limit must be between 1 and 200".to_string())
+    }
+}
+
+fn parse_impact_depth(value: &str) -> Result<usize, String> {
+    let depth = value
+        .parse::<usize>()
+        .map_err(|_| "depth must be a positive integer".to_string())?;
+    if (1..=5).contains(&depth) {
+        Ok(depth)
+    } else {
+        Err("depth must be between 1 and 5".to_string())
+    }
+}
+
+fn parse_confidence(value: &str) -> Result<i64, String> {
+    let confidence = value
+        .parse::<i64>()
+        .map_err(|_| "min-confidence must be an integer".to_string())?;
+    if (0..=100).contains(&confidence) {
+        Ok(confidence)
+    } else {
+        Err("min-confidence must be between 0 and 100".to_string())
+    }
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+pub(crate) enum ImpactDirection {
+    Callers,
+    Callees,
+    Both,
+}
 
 #[derive(Parser, Debug)]
 #[command(name = "ochna")]
@@ -42,6 +115,60 @@ enum Commands {
     Howto,
     /// Display index statistics
     Status,
+    /// Inspect index health and graph-quality diagnostics for structural review
+    Doctor,
+    /// List call sites whose targets could not be resolved
+    Unresolved {
+        /// Only include source files whose path starts with this prefix
+        #[arg(long = "in")]
+        in_path: Option<String>,
+        /// Maximum references to return (default 50, maximum 200)
+        #[arg(long, default_value_t = 50, value_parser = parse_unresolved_limit)]
+        limit: usize,
+    },
+    /// Find test relationships for a production symbol; evidence is structural, not coverage proof
+    TestsFor {
+        /// The name, qualified name, or ID of the production symbol to query
+        symbol: String,
+        /// Only resolve target symbols whose file path starts with this prefix
+        #[arg(long = "in")]
+        in_path: Option<String>,
+        /// Maximum test relationships to return (default 30, maximum 100)
+        #[arg(long, default_value_t = 30, value_parser = parse_tests_for_limit)]
+        limit: usize,
+    },
+    /// Traverse bounded, confidence-labelled structural impact from one symbol
+    Impact {
+        /// The ID or qualified name of exactly one indexed symbol
+        symbol: String,
+        /// Maximum traversal depth (default 2, maximum 5)
+        #[arg(long, default_value_t = 2, value_parser = parse_impact_depth)]
+        depth: usize,
+        /// Traverse incoming callers, outgoing callees, or both
+        #[arg(long, value_enum, default_value_t = ImpactDirection::Both)]
+        direction: ImpactDirection,
+        /// Only traverse relationships at or above this confidence (default 30)
+        #[arg(long, default_value_t = 30, value_parser = parse_confidence)]
+        min_confidence: i64,
+        /// Maximum reported nodes (default 50, maximum 200)
+        #[arg(long, default_value_t = 50, value_parser = parse_impact_limit)]
+        limit: usize,
+    },
+    /// Map a Git change or explicit paths onto current indexed symbols
+    Diff {
+        /// Git revision to compare from (optionally with --head)
+        #[arg(long, conflicts_with = "files")]
+        base: Option<String>,
+        /// Git revision to compare to; requires --base
+        #[arg(long, requires = "base")]
+        head: Option<String>,
+        /// Current workspace-relative paths to map without asking Git for a range
+        #[arg(long, num_args = 1.., conflicts_with = "base")]
+        files: Vec<String>,
+        /// Maximum changed symbols to return (default 100, maximum 500)
+        #[arg(long, default_value_t = 100, value_parser = parse_diff_limit)]
+        limit: usize,
+    },
     /// List indexed files with metadata
     Files,
     /// Search for nodes/symbols matching a query string
@@ -157,6 +284,65 @@ fn main() -> Result<(), Box<dyn Error>> {
         Commands::Status => {
             commands::run_status(&current_dir, json)?;
         }
+        Commands::Doctor => {
+            commands::run_doctor(&current_dir, json)?;
+        }
+        Commands::Unresolved { in_path, limit } => {
+            commands::run_unresolved(&current_dir, in_path.as_deref(), limit, json)?;
+        }
+        Commands::TestsFor {
+            symbol,
+            in_path,
+            limit,
+        } => {
+            commands::run_tests_for(
+                &current_dir,
+                &symbol,
+                in_path.as_deref(),
+                limit,
+                json,
+                no_tests,
+            )?;
+        }
+        Commands::Impact {
+            symbol,
+            depth,
+            direction,
+            min_confidence,
+            limit,
+        } => {
+            commands::run_impact(
+                &current_dir,
+                &symbol,
+                depth,
+                direction,
+                min_confidence,
+                limit,
+                json,
+                no_tests,
+            )?;
+        }
+        Commands::Diff {
+            base,
+            head,
+            files,
+            limit,
+        } => {
+            if base.is_none() && files.is_empty() {
+                return Err(
+                    "diff requires exactly one selector: --base <revision> or --files <path>..."
+                        .into(),
+                );
+            }
+            commands::run_diff(
+                &current_dir,
+                base.as_deref(),
+                head.as_deref(),
+                &files,
+                limit,
+                json,
+            )?;
+        }
         Commands::Files => {
             commands::run_files(&current_dir, json)?;
         }
@@ -248,5 +434,71 @@ mod tests {
 
         let absent = Cli::try_parse_from(["ochna", "status"]).expect("flag is optional");
         assert_eq!(absent.workspace, None);
+    }
+
+    #[test]
+    fn tests_for_parses_scope_and_enforces_its_limit() {
+        let cli = Cli::try_parse_from([
+            "ochna",
+            "tests-for",
+            "render",
+            "--in",
+            "src",
+            "--limit",
+            "100",
+        ])
+        .expect("valid tests-for arguments should parse");
+        match cli.command {
+            Commands::TestsFor {
+                symbol,
+                in_path,
+                limit,
+            } => {
+                assert_eq!(symbol, "render");
+                assert_eq!(in_path.as_deref(), Some("src"));
+                assert_eq!(limit, 100);
+            }
+            _ => panic!("expected tests-for command"),
+        }
+        assert!(Cli::try_parse_from(["ochna", "tests-for", "render", "--limit", "101"]).is_err());
+    }
+
+    #[test]
+    fn diff_requires_one_selector_and_enforces_its_limit() {
+        assert!(Cli::try_parse_from(["ochna", "diff", "--base", "HEAD", "--limit", "500"]).is_ok());
+        assert!(Cli::try_parse_from(["ochna", "diff", "--files", "src/lib.rs"]).is_ok());
+        assert!(
+            Cli::try_parse_from(["ochna", "diff", "--base", "HEAD", "--files", "src/lib.rs"])
+                .is_err()
+        );
+        assert!(
+            Cli::try_parse_from(["ochna", "diff", "--base", "HEAD", "--limit", "501"]).is_err()
+        );
+    }
+
+    #[test]
+    fn impact_parses_contract_defaults_and_bounds() {
+        let cli = Cli::try_parse_from(["ochna", "impact", "render"])
+            .expect("impact defaults should parse");
+        match cli.command {
+            Commands::Impact {
+                depth,
+                direction,
+                min_confidence,
+                limit,
+                ..
+            } => {
+                assert_eq!(depth, 2);
+                assert!(matches!(direction, ImpactDirection::Both));
+                assert_eq!(min_confidence, 30);
+                assert_eq!(limit, 50);
+            }
+            _ => panic!("expected impact command"),
+        }
+        assert!(Cli::try_parse_from(["ochna", "impact", "render", "--depth", "6"]).is_err());
+        assert!(Cli::try_parse_from(["ochna", "impact", "render", "--limit", "201"]).is_err());
+        assert!(
+            Cli::try_parse_from(["ochna", "impact", "render", "--min-confidence", "101"]).is_err()
+        );
     }
 }

@@ -1,0 +1,83 @@
+{
+  "base_revision": "fixture baseline commit",
+  "doctor": {
+    "trust_verdict": "trusted",
+    "resolution_tiers": true,
+    "unresolved_counts": true,
+    "collision_prone_names": true,
+    "low_quality_locations": true,
+    "unsupported_extensions": true
+  },
+  "changed_symbols": [
+    "src/lib.rs::render",
+    "src/lib.rs::render_page"
+  ],
+  "deleted_symbols": [
+    "src/lib.rs::legacy_render"
+  ],
+  "changed_edges": [
+    {
+      "source": "src/lib.rs::render",
+      "target": "src/lib.rs::legacy_render",
+      "relationship": "calls",
+      "change": "removed",
+      "requires_historical_index": true
+    }
+  ],
+  "newly_unresolved_callers": [
+    {
+      "source": "src/lib.rs::render_page",
+      "specifier": "missing_renderer",
+      "reason": "missing_target",
+      "line": 6
+    }
+  ],
+  "unresolved": {
+    "source": "src/lib.rs::render_page",
+    "specifier": "missing_renderer",
+    "reason": "missing_target",
+    "line": 6
+  },
+  "tests_for": {
+    "target": "src/lib.rs::render",
+    "test": "tests/render_tests.rs::render_page_uses_render",
+    "evidence": "direct_call",
+    "candidate_evidence": [
+      "same_module_candidate",
+      "name_heuristic"
+    ]
+  },
+  "impact": {
+    "root": "src/lib.rs::render",
+    "min_confidence": 30,
+    "direction": "callers",
+    "contains": [
+      "src/lib.rs::render_page",
+      "tests/render_tests.rs::render_page_uses_render"
+    ],
+    "preserve_paths": true,
+    "affected_tests": [
+      "tests/render_tests.rs::render_page_uses_render"
+    ],
+    "unresolved_boundaries": [
+      {
+        "source": "src/lib.rs::render_page",
+        "specifier": "missing_renderer",
+        "reason": "missing_target"
+      }
+    ]
+  },
+  "unmapped_hunk": {
+    "path": "README.md"
+  },
+  "diff_selectors": {
+    "git_range": {
+      "base": "fixture baseline commit",
+      "head": "current worktree"
+    },
+    "explicit_files": [
+      "src/lib.rs",
+      "tests/render_tests.rs"
+    ]
+  }
+}

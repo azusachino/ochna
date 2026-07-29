@@ -1,7 +1,7 @@
 //! Java AST traversal: classes/interfaces, methods/constructors, method
 //! invocations, and object-creation (constructor call) sites.
 
-use super::common::{find_child_by_kind, get_doc_comment, get_signature, raw_call};
+use super::common::{find_child_by_kind, get_doc_comment, get_signature, raw_call, text_for_node};
 use crate::db::{Node, RawCall};
 
 /// Recursively traverses a Java AST.
@@ -228,7 +228,11 @@ pub(super) fn traverse_java<'a>(
                                             });
 
                                             // Raw call linking the route node (as caller) to the method (as callee)
-                                            let rcall = raw_call(&route_id, qname.clone(), node);
+                                            let mut rcall =
+                                                raw_call(&route_id, qname.clone(), node);
+                                            rcall.relationship_kind = "route_handler".to_string();
+                                            rcall.target_qualified_hint = Some(qname.clone());
+                                            rcall.resolution_hint = Some(6);
                                             calls.push(rcall);
                                         }
                                     }
@@ -246,7 +250,7 @@ pub(super) fn traverse_java<'a>(
                         .utf8_text(content.as_bytes())
                         .unwrap_or("")
                         .to_string();
-                    let mut call = raw_call(caller, method_name, node);
+                    let mut call = raw_call(caller, method_name.clone(), node);
                     call.call_kind = Some("method".to_string());
                     call.package_or_namespace = package_name.map(|s| s.to_string());
 
@@ -262,6 +266,12 @@ pub(super) fn traverse_java<'a>(
                                 if let Some(t) = types.get(&receiver) {
                                     call.receiver_type = Some(t.clone());
                                     call.import_hint = find_import_hint(t, imports);
+                                    if let Some(service) = grpc_client_service(t) {
+                                        call.relationship_kind = "grpc_calls".to_string();
+                                        call.target_qualified_hint =
+                                            Some(format!("grpc::{service}::{method_name}"));
+                                        call.resolution_hint = Some(8);
+                                    }
                                 }
                             }
                             if call.import_hint.is_none() {
@@ -310,6 +320,474 @@ pub(super) fn traverse_java<'a>(
             next_local_types,
         );
     }
+}
+
+/// Extract framework relationships that are not ordinary Java invocation
+/// edges. Every emitted relation has an indexed source node and a parser
+/// supplied framework evidence tier; resolution never promotes it to `exact`.
+pub(super) fn extract_framework_relationships<'a>(
+    root: tree_sitter::Node<'a>,
+    content: &'a str,
+    file_path: &str,
+    nodes: &mut Vec<Node>,
+    calls: &mut Vec<RawCall>,
+    package_name: Option<&str>,
+) {
+    let mut cursor = root.walk();
+    for class in root.children(&mut cursor) {
+        extract_class_framework_relationships(
+            class,
+            content,
+            file_path,
+            nodes,
+            calls,
+            package_name,
+            None,
+        );
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn extract_class_framework_relationships<'a>(
+    node: tree_sitter::Node<'a>,
+    content: &'a str,
+    file_path: &str,
+    nodes: &mut Vec<Node>,
+    calls: &mut Vec<RawCall>,
+    package_name: Option<&str>,
+    parent_qname: Option<&str>,
+) {
+    if !matches!(node.kind(), "class_declaration" | "interface_declaration") {
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            extract_class_framework_relationships(
+                child,
+                content,
+                file_path,
+                nodes,
+                calls,
+                package_name,
+                parent_qname,
+            );
+        }
+        return;
+    }
+    let Some(name_node) = node.child_by_field_name("name") else {
+        return;
+    };
+    let name = text_for_node(name_node, content);
+    let qname = parent_qname
+        .map(|parent| format!("{parent}::{name}"))
+        .or_else(|| package_name.map(|package| format!("{package}::{name}")))
+        .unwrap_or(name.clone());
+    let class_id = format!("{file_path}::{qname}");
+    let annotations = annotation_names(node, content);
+    let component = annotations.iter().any(|annotation| {
+        matches!(
+            annotation.as_str(),
+            "Component"
+                | "Service"
+                | "Repository"
+                | "Controller"
+                | "RestController"
+                | "Configuration"
+        )
+    });
+
+    if let Some(prefix) = annotation_literal(node, content, "ConfigurationProperties") {
+        let config_qname = format!("config::{prefix}::{qname}");
+        let config_id =
+            push_framework_node(nodes, file_path, &config_qname, "config_key", node, content);
+        push_framework_relation(
+            calls,
+            &config_id,
+            name.clone(),
+            node,
+            "configuration_binds",
+            false,
+            Some(qname.clone()),
+            6,
+        );
+    }
+
+    let grpc_service = if annotations
+        .iter()
+        .any(|annotation| annotation == "GrpcService")
+    {
+        grpc_service_name(node, content)
+    } else {
+        None
+    };
+    let feign_service = annotation_literal(node, content, "FeignClient");
+    let constructors = direct_children_of_kind(node, "constructor_declaration");
+
+    for field in direct_children_of_kind(node, "field_declaration") {
+        if component && has_annotation(field, content, &["Autowired", "Inject", "Resource"]) {
+            if let Some(ty) = field
+                .child_by_field_name("type")
+                .map(|n| text_for_node(n, content))
+            {
+                push_framework_relation(
+                    calls,
+                    &class_id,
+                    ty,
+                    field,
+                    "injected_into",
+                    true,
+                    None,
+                    6,
+                );
+            }
+        }
+        if component {
+            if let Some(key) = annotation_placeholder(field, content, "Value") {
+                let key_qname = format!("config::{key}::{qname}");
+                let key_id =
+                    push_framework_node(nodes, file_path, &key_qname, "config_key", field, content);
+                push_framework_relation(
+                    calls,
+                    &key_id,
+                    name.clone(),
+                    field,
+                    "configuration_binds",
+                    false,
+                    Some(qname.clone()),
+                    6,
+                );
+            }
+        }
+    }
+
+    for constructor in &constructors {
+        let annotated = has_annotation(*constructor, content, &["Autowired", "Inject", "Resource"]);
+        if component && (annotated || constructors.len() == 1) {
+            let tier = if annotated { 6 } else { 7 };
+            for parameter in descendants_of_kind(*constructor, "formal_parameter") {
+                if let Some(ty) = parameter
+                    .child_by_field_name("type")
+                    .map(|n| text_for_node(n, content))
+                {
+                    push_framework_relation(
+                        calls,
+                        &class_id,
+                        ty,
+                        parameter,
+                        "injected_into",
+                        true,
+                        None,
+                        tier,
+                    );
+                }
+            }
+        }
+    }
+
+    for method in direct_children_of_kind(node, "method_declaration") {
+        let Some(method_name_node) = method.child_by_field_name("name") else {
+            continue;
+        };
+        let method_name = text_for_node(method_name_node, content);
+        let method_qname = format!("{qname}::{method_name}");
+        let method_id = format!("{file_path}::{method_qname}");
+
+        if let Some(service) = feign_service.as_deref() {
+            if has_mapping_annotation(method, content) {
+                let endpoint_qname = format!("feign::{service}::{method_qname}");
+                let endpoint_id = push_framework_node(
+                    nodes,
+                    file_path,
+                    &endpoint_qname,
+                    "feign_endpoint",
+                    method,
+                    content,
+                );
+                push_framework_relation(
+                    calls,
+                    &method_id,
+                    method_name.clone(),
+                    method,
+                    "feign_calls",
+                    false,
+                    Some(endpoint_qname),
+                    6,
+                );
+                let _ = endpoint_id;
+            }
+        }
+
+        if let Some(service) = grpc_service.as_deref() {
+            let endpoint_qname = format!("grpc::{service}::{method_name}");
+            push_framework_node(
+                nodes,
+                file_path,
+                &endpoint_qname,
+                "grpc_endpoint",
+                method,
+                content,
+            );
+        }
+
+        if has_annotation(method, content, &["EventListener"]) {
+            if let Some(event) = event_listener_type(method, content)
+                .or_else(|| first_parameter_type(method, content))
+            {
+                push_framework_relation(
+                    calls,
+                    &method_id,
+                    event,
+                    method,
+                    "consumes_event",
+                    true,
+                    None,
+                    6,
+                );
+            }
+        }
+        let local_types = collect_java_types(method, content);
+        for invocation in descendants_of_kind(method, "method_invocation") {
+            let Some(invoked) = invocation.child_by_field_name("name") else {
+                continue;
+            };
+            if text_for_node(invoked, content) != "publishEvent" {
+                continue;
+            }
+            let Some(arguments) = find_child_by_kind(invocation, "argument_list") else {
+                continue;
+            };
+            let mut event_type = None;
+            let mut event_anchor = None;
+            let mut cursor = arguments.walk();
+            for argument in arguments.children(&mut cursor) {
+                if argument.kind() == "object_creation_expression" {
+                    event_type = argument
+                        .child_by_field_name("type")
+                        .map(|ty| text_for_node(ty, content));
+                    event_anchor = Some(argument);
+                    break;
+                }
+                if argument.kind() == "identifier" {
+                    let name = text_for_node(argument, content);
+                    if let Some(ty) = local_types.get(&name) {
+                        event_type = Some(ty.clone());
+                        event_anchor = Some(argument);
+                        break;
+                    }
+                }
+            }
+            if let (Some(event_type), Some(event_anchor)) = (event_type, event_anchor) {
+                push_framework_relation(
+                    calls,
+                    &method_id,
+                    event_type,
+                    event_anchor,
+                    "publishes_event",
+                    false,
+                    None,
+                    7,
+                );
+            }
+        }
+    }
+
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        if matches!(child.kind(), "class_declaration" | "interface_declaration") {
+            extract_class_framework_relationships(
+                child,
+                content,
+                file_path,
+                nodes,
+                calls,
+                package_name,
+                Some(&qname),
+            );
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn push_framework_relation(
+    calls: &mut Vec<RawCall>,
+    source_id: &str,
+    target_name: String,
+    node: tree_sitter::Node,
+    kind: &str,
+    reverse: bool,
+    target_qualified_hint: Option<String>,
+    resolution_hint: i64,
+) {
+    let mut relation = raw_call(source_id, target_name, node);
+    relation.relationship_kind = kind.to_string();
+    relation.reverse_edge = reverse;
+    relation.target_qualified_hint = target_qualified_hint;
+    relation.resolution_hint = Some(resolution_hint);
+    calls.push(relation);
+}
+
+fn push_framework_node(
+    nodes: &mut Vec<Node>,
+    file_path: &str,
+    qname: &str,
+    kind: &str,
+    anchor: tree_sitter::Node,
+    content: &str,
+) -> String {
+    let id = format!("{file_path}::{qname}");
+    if nodes.iter().any(|node| node.id == id) {
+        return id;
+    }
+    let start = anchor.start_position();
+    let end = anchor.end_position();
+    nodes.push(Node {
+        id: id.clone(),
+        name: qname.rsplit("::").next().unwrap_or(qname).to_string(),
+        kind: kind.to_string(),
+        qualified_name: Some(qname.to_string()),
+        file_path: file_path.to_string(),
+        start_line: (start.row + 1) as i64,
+        end_line: (end.row + 1) as i64,
+        start_column: start.column as i64,
+        end_column: end.column as i64,
+        signature: Some(get_signature(anchor, content)),
+        doc_comment: get_doc_comment(anchor, content),
+        is_test: false,
+        resolution_kind: None,
+        confidence: None,
+    });
+    id
+}
+
+fn descendants_of_kind<'a>(node: tree_sitter::Node<'a>, kind: &str) -> Vec<tree_sitter::Node<'a>> {
+    let mut out = Vec::new();
+    fn walk<'a>(node: tree_sitter::Node<'a>, kind: &str, out: &mut Vec<tree_sitter::Node<'a>>) {
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            if child.kind() == kind {
+                out.push(child);
+            }
+            walk(child, kind, out);
+        }
+    }
+    walk(node, kind, &mut out);
+    out
+}
+
+fn direct_children_of_kind<'a>(
+    node: tree_sitter::Node<'a>,
+    kind: &str,
+) -> Vec<tree_sitter::Node<'a>> {
+    let Some(body) = find_child_by_kind(node, "class_body")
+        .or_else(|| find_child_by_kind(node, "interface_body"))
+    else {
+        return Vec::new();
+    };
+    let mut cursor = body.walk();
+    body.children(&mut cursor)
+        .filter(|child| child.kind() == kind)
+        .collect()
+}
+
+fn annotation_names(node: tree_sitter::Node, content: &str) -> Vec<String> {
+    find_annotations(node)
+        .into_iter()
+        .filter_map(|annotation| {
+            find_child_by_kind(annotation, "identifier").map(|name| text_for_node(name, content))
+        })
+        .collect()
+}
+
+fn has_annotation(node: tree_sitter::Node, content: &str, expected: &[&str]) -> bool {
+    annotation_names(node, content)
+        .iter()
+        .any(|name| expected.contains(&name.as_str()))
+}
+
+fn annotation_literal(
+    node: tree_sitter::Node,
+    content: &str,
+    annotation_name: &str,
+) -> Option<String> {
+    find_annotations(node).into_iter().find_map(|annotation| {
+        (find_child_by_kind(annotation, "identifier")
+            .map(|name| text_for_node(name, content))
+            .as_deref()
+            == Some(annotation_name))
+        .then(|| {
+            descendants_of_kind(annotation, "string_literal")
+                .into_iter()
+                .next()
+        })
+        .flatten()
+        .and_then(|literal| extract_string_literal_value(literal, content))
+    })
+}
+
+fn annotation_placeholder(
+    node: tree_sitter::Node,
+    content: &str,
+    annotation_name: &str,
+) -> Option<String> {
+    annotation_literal(node, content, annotation_name).and_then(|value| {
+        value
+            .strip_prefix("${")
+            .and_then(|key| key.strip_suffix('}'))
+            .map(str::to_string)
+    })
+}
+
+fn has_mapping_annotation(node: tree_sitter::Node, content: &str) -> bool {
+    has_annotation(
+        node,
+        content,
+        &[
+            "RequestMapping",
+            "GetMapping",
+            "PostMapping",
+            "PutMapping",
+            "DeleteMapping",
+            "PatchMapping",
+        ],
+    )
+}
+
+fn event_listener_type(node: tree_sitter::Node, content: &str) -> Option<String> {
+    find_annotations(node).into_iter().find_map(|annotation| {
+        let is_listener = find_child_by_kind(annotation, "identifier")
+            .map(|name| text_for_node(name, content))
+            .as_deref()
+            == Some("EventListener");
+        if !is_listener {
+            return None;
+        }
+        let text = text_for_node(annotation, content);
+        text.split('(')
+            .nth(1)
+            .and_then(|value| value.split(".class").next())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+    })
+}
+
+fn first_parameter_type(node: tree_sitter::Node, content: &str) -> Option<String> {
+    descendants_of_kind(node, "formal_parameter")
+        .into_iter()
+        .next()
+        .and_then(|parameter| parameter.child_by_field_name("type"))
+        .map(|ty| text_for_node(ty, content))
+}
+
+fn grpc_service_name(node: tree_sitter::Node, content: &str) -> Option<String> {
+    let text = get_signature(node, content);
+    let marker = text.split("extends ").nth(1)?.split_whitespace().next()?;
+    marker.split("Grpc.").next().map(str::to_string)
+}
+
+fn grpc_client_service(receiver_type: &str) -> Option<&str> {
+    receiver_type
+        .split("Grpc.")
+        .next()
+        .filter(|_| receiver_type.contains("Stub"))
 }
 
 fn find_annotations<'a>(node: tree_sitter::Node<'a>) -> Vec<tree_sitter::Node<'a>> {

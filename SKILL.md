@@ -27,7 +27,7 @@ Use this to cut noise on common method names in large Go/Java corpora.
 `@RequestMapping` paths with method-level `@GetMapping`, `@PostMapping`,
 `@PutMapping`, `@DeleteMapping`, `@PatchMapping`, and `@RequestMapping`
 annotations. Route nodes are named like `GET /api/users/{id}` or
-`ANY /api/status` and have call edges to their handler methods, so
+`ANY /api/status` and have `route_handler` edges to their handler methods, so
 `ochna explore "/api"` or `ochna callers <handler>` can reveal HTTP entry
 points as graph nodes.
 
@@ -35,14 +35,17 @@ points as graph nodes.
 
 **Self-describing workflow**: run `ochna howto` when you need the canonical query flow. Run `ochna howto --json` for a machine-readable capability descriptor. `ochna init`/`ochna sync` also write `.ochna/AGENT.md`, a generated pointer with index provenance and links back to `ochna howto` and `ochna status`.
 
+**Structural review workflow (v0.3)**: `doctor` → `diff` → `impact` → `tests-for` → `unresolved` is the diff-aware review flow, frozen in `docs/v0.3-contract.md`. `doctor` is the review preflight (graph `trust_verdict`, resolution tiers, unresolved/collision/low-quality diagnostics; exits nonzero when degraded or unusable — a large monorepo like Netty or Kubernetes legitimately reports `degraded`, so treat it as a scale signal, not necessarily a defect). `diff (--base <rev> [--head <rev>] | --files <path>...)` maps a Git range or explicit paths to changed symbols/edges; historical ranges use disposable temporary indexes and honestly report `base_revision_unavailable` on a shallow clone rather than guessing. `impact <symbol> [--depth <n>] [--direction callers|callees|both] [--min-confidence <n>]` is a bounded, confidence-labelled blast radius (default depth 2, min-confidence 30, max depth 5/200 nodes/400 edges) that reports `affected_tests` and `unresolved_boundaries`, and refuses to guess across an ambiguous bare name (e.g. a 9-way `GetList` collision) rather than exploding into an unbounded common-name traversal. `tests-for <symbol>` labels each result `direct_call`, `same_module_candidate`, or `name_heuristic` and never claims proof of coverage — a production symbol whose only test coverage is *indirect* (a JUnit wrapper that triggers it through lifecycle, not a direct call) correctly returns an empty `tests` array; this is a documented tradeoff, not a bug, see `docs/experiments/v0.3-acceptance-netty.md`. `unresolved [--in <path-prefix>] [--limit <n>]` lists call sites that couldn't become a trusted edge, each with an explicit reason. All five accept `--workspace`/`-C`, `--json`, `--no-tests`, and emit the same `contract_version: "0.3"` JSON envelope.
+
 ## Command Surface
 
 Run `ochna howto` (or `ochna howto --json` for a capability descriptor) for the
 full, always-current command and flag reference — it is the single source of
 truth and stays in sync with the installed binary, so this playbook does not
 re-list every command. The flow is `status` → `search` → `callers`/`callees` →
-`node`, with `explore` for a combined view. Judgment notes specific to this
-playbook:
+`node`, with `explore` for a combined view; the review flow above is
+`doctor` → `diff` → `impact` → `tests-for` → `unresolved`. Judgment notes
+specific to this playbook:
 
 - `--show-resolution` / `--min-confidence <N>` on `callers` apply the confidence
   cascade above; use `--min-confidence 80` to cut noise on common Go/Java method
