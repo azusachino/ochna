@@ -31,7 +31,7 @@ receiver type when locally inferable, package/namespace, import hints) and
 resolve in staged passes, each stage producing a labelled confidence tier
 instead of a single silent guess:
 
-```
+```text
 exact (100) > receiver_type (90) > package/namespace (80) > same_file (60) > name_only (30)
 ```
 

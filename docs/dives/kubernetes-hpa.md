@@ -22,7 +22,7 @@ pays off vs. where a fallback is needed.
 
 ## Execution log (queries that mattered)
 
-```
+```text
 ochna -C clones/kubernetes search HorizontalController          # → type + 30 methods, all in horizontal.go
 ochna -C clones/kubernetes --no-tests callers NewHorizontalController
                                                                 # → newHorizontalPodAutoscalerController (cmd/kube-controller-manager)
@@ -68,10 +68,12 @@ functions; weak whenever a name is generic (use a qualified pivot or fall back t
 ## Report — How HPA works
 
 ### Where it lives
+
 `pkg/controller/podautoscaler/`: orchestration in `horizontal.go`, scaling math in
 `replica_calculator.go`, metrics access in the `metrics/` sub-package.
 
 ### Wiring & lifecycle
+
 - **Construction:** `NewHorizontalController` (`horizontal.go:138`), started by
   `newHorizontalPodAutoscalerController` (`cmd/kube-controller-manager/app/autoscaling.go:43`)
   — i.e. launched by kube-controller-manager like every built-in controller.
@@ -81,7 +83,8 @@ functions; weak whenever a name is generic (use a qualified pivot or fall back t
   controller pattern — see pitfall #1.)*
 
 ### Reconcile → desired replicas
-```
+
+```text
 reconcileAutoscaler            horizontal.go:853   per-HPA reconcile
  └─ computeReplicasForMetrics  horizontal.go:378   loop over metric specs, take max
      └─ computeReplicasForMetric        :504       dispatch by metric type
@@ -89,9 +92,11 @@ reconcileAutoscaler            horizontal.go:853   per-HPA reconcile
              └─ GetResourceReplicas  replica_calculator.go:80   ── crosses file
                  └─ calcPlainMetricReplicas        :193   the math
 ```
+
 The controller evaluates every metric in the HPA spec and takes the **max** desired count.
 
 ### The scaling formula (`calcPlainMetricReplicas`, `replica_calculator.go:193`)
+
 - `usageRatio = currentUsage / targetUsage` (`:212`).
 - **Base formula:** `desired = ceil(usageRatio * readyPodCount)` (`:223`).
 - **Tolerance band:** if `tolerances.isWithin(usageRatio)`, return current replicas (`:217`) — anti-flap.
@@ -100,16 +105,19 @@ The controller evaluates every metric in the HPA spec and takes the **max** desi
   *flip scale direction* is suppressed (`:250`).
 
 ### Post-computation shaping (`horizontal.go`)
+
 - `normalizeDesiredReplicas` (`:1138`) — min/max bounds + disabled conditions.
 - Behavior/rate: `convertDesiredReplicasWithBehaviorRate` (`:1346`), history in `storeScaleEvent` (`:1235`).
 - Stabilization window: `stabilizeRecommendation` (`:1112`) / `stabilizeRecommendationWithBehaviors` (`:1286`).
 - Tolerances: `tolerancesForHpa` (`:1604`). Status: `setStatus` (`:1555`) / `updateStatusIfNeeded` (`:1575`).
 
 ### Metrics source
+
 `computeStatusForResourceMetricGeneric` reads usage via `GetResourceMetric`
 (`podautoscaler/metrics/client.go:67`) — the boundary to metrics-server / custom-metrics APIs.
 
 ### Mental model
+
 > A worker dequeues an HPA key → `reconcileAutoscaler` fetches current scale and, per metric
 > spec, asks the replica calculator for a desired count (`ceil(currentReplicas · usage/target)`,
 > with tolerance + unready/missing guards) → takes the max across metrics → clamps through

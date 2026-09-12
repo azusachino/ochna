@@ -35,7 +35,7 @@ points as graph nodes.
 
 **Self-describing workflow**: run `ochna howto` when you need the canonical query flow. Run `ochna howto --json` for a machine-readable capability descriptor. `ochna init`/`ochna sync` also write `.ochna/AGENT.md`, a generated pointer with index provenance and links back to `ochna howto` and `ochna status`.
 
-**Structural review workflow (v0.3)**: `doctor` → `diff` → `impact` → `tests-for` → `unresolved` is the diff-aware review flow, frozen in `docs/v0.3-contract.md`. `doctor` is the review preflight (graph `trust_verdict`, resolution tiers, unresolved/collision/low-quality diagnostics; exits nonzero when degraded or unusable — a large monorepo like Netty or Kubernetes legitimately reports `degraded`, so treat it as a scale signal, not necessarily a defect). `diff (--base <rev> [--head <rev>] | --files <path>...)` maps a Git range or explicit paths to changed symbols/edges; historical ranges use disposable temporary indexes and honestly report `base_revision_unavailable` on a shallow clone rather than guessing. `impact <symbol> [--depth <n>] [--direction callers|callees|both] [--min-confidence <n>]` is a bounded, confidence-labelled blast radius (default depth 2, min-confidence 30, max depth 5/200 nodes/400 edges) that reports `affected_tests` and `unresolved_boundaries`, and refuses to guess across an ambiguous bare name (e.g. a 9-way `GetList` collision) rather than exploding into an unbounded common-name traversal. `tests-for <symbol>` labels each result `direct_call`, `same_module_candidate`, or `name_heuristic` and never claims proof of coverage — a production symbol whose only test coverage is *indirect* (a JUnit wrapper that triggers it through lifecycle, not a direct call) correctly returns an empty `tests` array; this is a documented tradeoff, not a bug, see `docs/experiments/v0.3-acceptance-netty.md`. `unresolved [--in <path-prefix>] [--limit <n>]` lists call sites that couldn't become a trusted edge, each with an explicit reason. All five accept `--workspace`/`-C`, `--json`, `--no-tests`, and emit the same `contract_version: "0.3"` JSON envelope.
+**Structural review workflow (v0.3)**: `doctor` → `diff` → `impact` → `tests-for` → `unresolved` is the diff-aware review flow, frozen in `docs/v0.3-contract.md`. `doctor` is the review preflight (graph `trust_verdict`, resolution tiers, unresolved/collision/low-quality diagnostics; exits nonzero when degraded or unusable — a large monorepo like Netty or Kubernetes legitimately reports `degraded`, so treat it as a scale signal, not necessarily a defect). `diff (--base <rev> [--head <rev>] | --files <path>...)` maps a Git range or explicit paths to changed symbols/edges; historical ranges use disposable temporary indexes and honestly report `base_revision_unavailable` on a shallow clone rather than guessing. `impact <symbol> [--depth <n>] [--direction callers|callees|both] [--min-confidence <n>]` is a bounded, confidence-labelled blast radius (default depth 2, min-confidence 30, max depth 5/200 nodes/400 edges) that reports `affected_tests` and `unresolved_boundaries`, and refuses to guess across an ambiguous bare name (e.g. a 9-way `GetList` collision) rather than exploding into an unbounded common-name traversal. `tests-for <symbol>` labels each result `direct_call`, `same_module_candidate`, or `name_heuristic` and never claims proof of coverage — a production symbol whose only test coverage is _indirect_ (a JUnit wrapper that triggers it through lifecycle, not a direct call) correctly returns an empty `tests` array; this is a documented tradeoff, not a bug, see `docs/experiments/v0.3-acceptance-netty.md`. `unresolved [--in <path-prefix>] [--limit <n>]` lists call sites that couldn't become a trusted edge, each with an explicit reason. All five accept `--workspace`/`-C`, `--json`, `--no-tests`, and emit the same `contract_version: "0.3"` JSON envelope.
 
 ## Command Surface
 
@@ -72,20 +72,24 @@ specific to this playbook:
 For custom queries or advanced analytics directly from the SQLite database:
 
 - **Generate Structured Report**:
+
   ```bash
   uv run python scripts/report.py
   ```
+
   _This runs under Python 3.14 and directly extracts file distributions, symbol counts, and hot call sites using `sqlite3` without invoking the binary._
 
 - **Explain a GitHub PR against an indexed checkout**:
+
   ```bash
   uv run python scripts/pr_feature_report.py --workspace clones/kubernetes --repo kubernetes/kubernetes --pr 139848
   ```
+
   _Use this for large benchmark submodules where local history may be shallow. It reads PR metadata and changed files with `gh api`, then reads symbols from the local `.ochna/ochna.db`._
 
 ## Workflow Integration Rules
 
-1.  **Graph First**: For symbol and relationship questions, run `ochna explore <keyword>` / `ochna search` first to map the call graph — it answers "who calls / what does this call" that `rg` cannot cheaply.
-2.  **Right Tool per Question**: Use `ochna search`/`callers`/`callees` for symbol and call-graph lookups; use `rg` for free-text or regex occurrences (e.g. where a string or config key appears) and `ast-grep` for structural AST patterns or rewrites. They complement each other.
-3.  **Read Replacements**: For structural reads, `ochna node --file <path>` returns line numbers and attaches dependents — handy when you want symbols + graph context rather than raw text.
-4.  **Large PR Archaeology**: For Linux/Kubernetes-style corpora, do not assume local merge parents exist. First verify the index with `ochna status --json`, use `gh api` for PR metadata and changed files, then use `ochna node --file ... --symbols-only --json` and `ochna node --symbol ... --include-code --json` for the changed symbols. Treat common Go method callees such as `GetList`, `Run`, `Add`, and `Stop` as noisy unless they are anchored to the changed file or exact production symbol.
+1. **Graph First**: For symbol and relationship questions, run `ochna explore <keyword>` / `ochna search` first to map the call graph — it answers "who calls / what does this call" that `rg` cannot cheaply.
+2. **Right Tool per Question**: Use `ochna search`/`callers`/`callees` for symbol and call-graph lookups; use `rg` for free-text or regex occurrences (e.g. where a string or config key appears) and `ast-grep` for structural AST patterns or rewrites. They complement each other.
+3. **Read Replacements**: For structural reads, `ochna node --file <path>` returns line numbers and attaches dependents — handy when you want symbols + graph context rather than raw text.
+4. **Large PR Archaeology**: For Linux/Kubernetes-style corpora, do not assume local merge parents exist. First verify the index with `ochna status --json`, use `gh api` for PR metadata and changed files, then use `ochna node --file ... --symbols-only --json` and `ochna node --symbol ... --include-code --json` for the changed symbols. Treat common Go method callees such as `GetList`, `Run`, `Add`, and `Stop` as noisy unless they are anchored to the changed file or exact production symbol.

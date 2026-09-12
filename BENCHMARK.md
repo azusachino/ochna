@@ -12,4 +12,3 @@
 | zig | Zig | 738d2be9d6b6 | 16980 | 182614 | 91544 | - | 1 | degraded |
 | ghostty | Zig/C | ae8727401d8c | 796 | 7818 | 10373 | - | 0 | degraded |
 | flink | Java | da4a182934fe | 14864 | 148639 | 255280 | - | 1 | degraded |
-

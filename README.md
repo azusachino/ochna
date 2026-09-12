@@ -11,12 +11,12 @@
 
 ## 🚀 Key Features
 
-*   **Fast Indexing**: Scans and parses files recursively, using content hashes to only re-index modified files.
-*   **Confidence-Aware Call Graph**: Traces callers and callees structurally across files. Each edge is resolved through a staged cascade (exact qualified hint → receiver type → package/namespace → same file → unique name) and tagged with a confidence score; ambiguous name-only matches are kept as unresolved references instead of polluting the graph with low-confidence edges.
-*   **FTS5 Full-Text Search**: Instantly searches signatures, symbols, and docstrings via SQLite's FTS5 engine.
-*   **Git Baseline Mapping**: Links indexed database states with Git metadata (current commit SHA, branch, status), ensuring queries are matched against a known codebase version.
-*   **Machine-Readable Output**: Accepts a global `--json` flag to emit structured JSON for programmatic consumption (diagnostics and progress go to `stderr`).
-*   **Agent-Friendly Workflow Guide**: `ochna howto` teaches the recommended search -> callers -> node investigation flow and emits a JSON capability descriptor for automation.
+* **Fast Indexing**: Scans and parses files recursively, using content hashes to only re-index modified files.
+* **Confidence-Aware Call Graph**: Traces callers and callees structurally across files. Each edge is resolved through a staged cascade (exact qualified hint → receiver type → package/namespace → same file → unique name) and tagged with a confidence score; ambiguous name-only matches are kept as unresolved references instead of polluting the graph with low-confidence edges.
+* **FTS5 Full-Text Search**: Instantly searches signatures, symbols, and docstrings via SQLite's FTS5 engine.
+* **Git Baseline Mapping**: Links indexed database states with Git metadata (current commit SHA, branch, status), ensuring queries are matched against a known codebase version.
+* **Machine-Readable Output**: Accepts a global `--json` flag to emit structured JSON for programmatic consumption (diagnostics and progress go to `stderr`).
+* **Agent-Friendly Workflow Guide**: `ochna howto` teaches the recommended search -> callers -> node investigation flow and emits a JSON capability descriptor for automation.
 
 ---
 
@@ -41,29 +41,38 @@ cargo install --path .
 ## 🎯 Quick Start
 
 ### 1. Initialize the index
+
 Create a local database at `<workspace_root>/.ochna/ochna.db` and perform the initial scan:
+
 ```bash
 ochna init
 ```
+
 By default, generated/library directories such as `target`, `node_modules`, `.venv`, `vendor`, `build`, `dist`, and `clones` are skipped. Use `ochna init --include-library` to index them.
 
 ### 2. Keep it in sync
+
 Incrementally update the index after code changes (only modified files are re-parsed):
+
 ```bash
 ochna sync
 ```
 
 ### 3. Check freshness
+
 Display the index statistics and Git baseline, or gate automation on `status --json`:
+
 ```bash
 ochna status
 ochna status --json   # exits non-zero and reports an `action` when stale/unusable
 ```
 
 ### 4. Learn the query flow
+
 `ochna howto` is the canonical, always-current reference for the query commands
 (`search`, `callers`, `node`, `explore`) and their flags. It stays in sync with the
 installed binary, so this README intentionally does not duplicate it:
+
 ```bash
 ochna howto          # human-readable workflow
 ochna howto --json   # machine-readable capability descriptor
@@ -78,6 +87,7 @@ or run `make setup` to do that plus init submodules and build.
 
 Run the agent-facing CLI smoke tests against a release build (drives the real
 binary and asserts behavior, not just exit codes):
+
 ```bash
 make verify-clis
 ```
