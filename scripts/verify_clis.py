@@ -284,6 +284,8 @@ def main() -> int:
         # drift that previously broke it silently). helper has two incoming calls.
         report = run([sys.executable, str(repo_root / "scripts" / "report.py")], tmp)
         assert "Hotspots" in report.stdout
+        assert "PageRank Centrality" in report.stdout
+        assert "Call-Graph Cycles (Tarjan SCC)" in report.stdout
         assert "helper" in report.stdout
 
         # --- status --json gates non-zero when the index goes stale, then sync clears it ---
