@@ -12,13 +12,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       # Reads .mise.toml (rust = "stable"), the same file `make check`/`make
       # test` resolve against locally via `mise x --`, so CI and local dev
       # can't drift onto different toolchain versions.
       - name: Install mise-managed toolchain (rust)
-        uses: jdx/mise-action@v2
+        uses: jdx/mise-action@v5
 
       - name: Cache dependencies
         uses: swatinem/rust-cache@v2
