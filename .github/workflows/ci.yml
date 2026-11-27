@@ -1,15 +1,30 @@
 name: CI
 
+# Pull requests and manual runs: a merge to main re-ran the check its pull
+# request had just passed. The weekly run on main keeps the Rust cache that pull
+# requests restore from alive (GitHub evicts entries unused for seven days). Docs-only changes skip CI at the trigger.
 on:
-  push:
-    branches: [ main ]
   pull_request:
     branches: [ main ]
+    paths-ignore:
+      - '**/*.md'
+      - 'docs/**'
+  schedule:
+    - cron: '0 18 * * 0' # Monday 03:00 JST
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   test:
     name: Build & Test
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7
@@ -20,8 +35,10 @@ jobs:
       - name: Install mise-managed toolchain (rust)
         uses: jdx/mise-action@v5
 
-      - name: Cache dependencies
-        uses: swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@v2
+        with:
+          # Pull requests restore main's cache; only main writes it.
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Check formatting and lint
         run: make check
